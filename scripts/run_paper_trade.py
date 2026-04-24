@@ -289,6 +289,10 @@ class PaperTradingOrchestrator:
                 # 日线策略：scan 用当前 DB 里的数据（已包含 d 日收盘）
                 self.scan()
                 recon = self.reconciliation.run(date=d.isoformat())
+                # 阶段8 Fix Round 3：每天补跑完都写一份净值快照
+                # 这样 daily_performance 表会随 Paper Trading 累积，
+                # Dashboard 的净值曲线才有真实数据
+                self.trader.take_daily_snapshot(scan_date=d.isoformat())
                 summary["processed"].append({
                     "date": d.isoformat(),
                     "trades": recon["trades"]["total"],

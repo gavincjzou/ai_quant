@@ -336,21 +336,44 @@ class PaperTrader:
             else:
                 pos["market_value"] = pos["current_price"] * pos["quantity"]
 
-    def take_daily_snapshot(self):
-        """记录每日快照"""
+    def take_daily_snapshot(self, scan_date: Optional[str] = None) -> dict:
+        """
+        记录每日快照。
+
+        Args:
+            scan_date: 可选，指定快照的日期（YYYY-MM-DD）。默认今天。
+                       用于 daily-scan 补跑历史日期时，避免把多天快照
+                       都写成"今天"。
+
+        注意：
+        - daily_pnl 取自 RiskManager 的当日累计
+        - cumulative_return 基于 initial_capital 计算（阶段8 新增）
+        """
+        snapshot_date = scan_date or datetime.now().strftime("%Y-%m-%d")
+        cum_return = (
+            (self.total_assets - self.initial_capital) / self.initial_capital
+            if self.initial_capital > 0 else 0.0
+        )
         snapshot = {
             "trade_mode": "paper",
-            "date": datetime.now().strftime("%Y-%m-%d"),
+            "date": snapshot_date,
             "total_assets": self.total_assets,
             "cash": self.cash,
             "market_value": self.market_value,
             "daily_pnl": self.risk_manager._daily_pnl,
+            "daily_return": 0.0,  # 需要前一天数据才能算，先留 0
+            "cumulative_return": cum_return,
+            "max_drawdown": 0.0,  # 需要历史 peak 才能算，先留 0
+            "trade_count": len([t for t in self.trade_history
+                                if t.get("executed_at", "").startswith(snapshot_date)]),
             "positions": {s: dict(p) for s, p in self.positions.items()},
         }
         self.daily_snapshots.append(snapshot)
 
         if self.db:
             self.db.save_daily_performance(snapshot)
+            logger.info(f"[PaperTrader] Daily snapshot saved: {snapshot_date} "
+                        f"total=${self.total_assets:,.2f}, cum_ret={cum_return:+.2%}")
 
         return snapshot
 

@@ -215,14 +215,39 @@ def collect_dashboard_data(project_root: str) -> Dict[str, Any]:
 
 def build_equity_curve(db: DatabaseManager, initial: float, trades: list) -> list:
     """
-    重建每日净值曲线。
-    简化逻辑：从 trades 按时间倒推每日总资产，配合最新现金推算。
-    更精确的方式需要每日 snapshot，这里取个近似。
+    构建每日净值曲线。
+
+    阶段8 Fix Round 3：优先从 daily_performance 表读（真实数据）。
+    如果表空或不足，才降级到从 trades 近似估算。
     """
+    # 优先从 daily_performance 表读
+    try:
+        with db._get_conn() as conn:
+            cur = conn.execute(
+                "SELECT date, total_assets, cumulative_return, trade_count "
+                "FROM daily_performance "
+                "WHERE trade_mode = 'paper' "
+                "ORDER BY date ASC"
+            )
+            rows = cur.fetchall()
+        if rows and len(rows) >= 1:
+            points = [
+                {
+                    "date": r["date"] if isinstance(r, dict) else r[0],
+                    "value": float(r["total_assets"] if isinstance(r, dict) else r[1]),
+                    "cum_return": float(r["cumulative_return"] if isinstance(r, dict) else r[2]) if r[2] is not None else 0,
+                    "trades": int(r["trade_count"] if isinstance(r, dict) else r[3]) if r[3] is not None else 0,
+                }
+                for r in rows
+            ]
+            return points
+    except Exception as e:
+        logger.warning(f"从 daily_performance 读失败，降级到近似重建：{e}")
+
+    # 降级：从 trades 近似（仅兜底）
     if not trades:
         return [{"date": datetime.now().strftime("%Y-%m-%d"), "value": initial}]
 
-    # 按交易日聚合（cash 流出/流入）
     df = pd.DataFrame(trades)
     df["date"] = pd.to_datetime(df["executed_at"]).dt.date.astype(str)
     df["cash_flow"] = df.apply(
@@ -232,13 +257,8 @@ def build_equity_curve(db: DatabaseManager, initial: float, trades: list) -> lis
         axis=1,
     )
     daily_cf = df.groupby("date")["cash_flow"].sum().reset_index()
-
-    # 简单估算：每日 total_assets ≈ 初始资金 + 截至当日的累计 cash_flow + 当日持仓市值变化
-    # 暂时用最简单的：value = initial（持仓+cash 守恒）。这是近似。
-    # 真实项目里应该有每日 snapshot 表，等 daily_performance 表数据多了可以替换
     points = []
     for _, row in daily_cf.iterrows():
-        # 简单展示：每日把 cash_flow 累计上去（实际波动需要 snapshot）
         points.append({"date": row["date"], "value": initial})  # 占位
 
     # 真实总资产从 trading_state 拿（最新一次）
