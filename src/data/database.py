@@ -135,6 +135,34 @@ class DatabaseManager:
                 )
             """)
 
+            # 阶段 9 新增：因子快照表
+            # 存储每日每只标的的原始因子指标 + 归一化得分
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS factor_snapshots (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    date TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    -- 原始指标
+                    pe_ttm_ratio REAL,
+                    pb_ratio REAL,
+                    dividend_ratio_ttm REAL,
+                    total_market_value REAL,
+                    five_day_change_rate REAL,
+                    half_year_change_rate REAL,
+                    turnover_rate REAL,
+                    -- 因子得分（归一化后）
+                    value_score REAL,
+                    momentum_score REAL,
+                    size_score REAL,
+                    liquidity_score REAL,
+                    total_score REAL,
+                    rank INTEGER,
+                    -- 元信息
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(date, symbol)
+                )
+            """)
+
             # 创建索引
             cursor.execute(
                 "CREATE INDEX IF NOT EXISTS idx_kline_symbol_date "
@@ -360,3 +388,90 @@ class DatabaseManager:
                     perf.get("trade_count", 0),
                 ),
             )
+
+    # ----------------------------------------------------------
+    # Factor Snapshots（阶段 9 新增）
+    # ----------------------------------------------------------
+
+    def save_factor_snapshot(self, snapshot: dict):
+        """保存一个标的在某日的因子快照（原始指标 + 得分）"""
+        with self._get_conn() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO factor_snapshots (
+                    date, symbol,
+                    pe_ttm_ratio, pb_ratio, dividend_ratio_ttm, total_market_value,
+                    five_day_change_rate, half_year_change_rate, turnover_rate,
+                    value_score, momentum_score, size_score, liquidity_score,
+                    total_score, rank
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    snapshot["date"],
+                    snapshot["symbol"],
+                    snapshot.get("pe_ttm_ratio"),
+                    snapshot.get("pb_ratio"),
+                    snapshot.get("dividend_ratio_ttm"),
+                    snapshot.get("total_market_value"),
+                    snapshot.get("five_day_change_rate"),
+                    snapshot.get("half_year_change_rate"),
+                    snapshot.get("turnover_rate"),
+                    snapshot.get("value_score"),
+                    snapshot.get("momentum_score"),
+                    snapshot.get("size_score"),
+                    snapshot.get("liquidity_score"),
+                    snapshot.get("total_score"),
+                    snapshot.get("rank"),
+                ),
+            )
+
+    def save_factor_snapshots_batch(self, snapshots: list):
+        """批量保存因子快照（一次 commit 多条，性能优化）"""
+        if not snapshots:
+            return
+        rows = [
+            (
+                s["date"], s["symbol"],
+                s.get("pe_ttm_ratio"), s.get("pb_ratio"),
+                s.get("dividend_ratio_ttm"), s.get("total_market_value"),
+                s.get("five_day_change_rate"), s.get("half_year_change_rate"),
+                s.get("turnover_rate"),
+                s.get("value_score"), s.get("momentum_score"),
+                s.get("size_score"), s.get("liquidity_score"),
+                s.get("total_score"), s.get("rank"),
+            )
+            for s in snapshots
+        ]
+        with self._get_conn() as conn:
+            conn.executemany(
+                """
+                INSERT OR REPLACE INTO factor_snapshots (
+                    date, symbol,
+                    pe_ttm_ratio, pb_ratio, dividend_ratio_ttm, total_market_value,
+                    five_day_change_rate, half_year_change_rate, turnover_rate,
+                    value_score, momentum_score, size_score, liquidity_score,
+                    total_score, rank
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+
+    def load_factor_snapshots(self, date: str = None, limit: int = None) -> "pd.DataFrame":
+        """读因子快照。不传 date 读最新日期那天的全部。"""
+        import pandas as pd
+        with self._get_conn() as conn:
+            if date:
+                df = pd.read_sql_query(
+                    "SELECT * FROM factor_snapshots WHERE date = ? ORDER BY rank ASC",
+                    conn, params=(date,)
+                )
+            else:
+                df = pd.read_sql_query(
+                    """SELECT * FROM factor_snapshots
+                       WHERE date = (SELECT MAX(date) FROM factor_snapshots)
+                       ORDER BY rank ASC""",
+                    conn
+                )
+            if limit:
+                df = df.head(limit)
+            return df

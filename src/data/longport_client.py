@@ -24,6 +24,7 @@ try:
         OrderType,
         TimeInForceType,
         Market,
+        CalcIndex,
     )
 
     LONGPORT_AVAILABLE = True
@@ -227,6 +228,68 @@ class LongPortClient:
         ctx.set_on_quote(callback)
         self._retry(ctx.subscribe, symbols, sub_types, is_first_push=True)
         logger.info(f"Subscribed to realtime quotes: {symbols}")
+
+    def fetch_calc_indexes(
+        self,
+        symbols: List[str],
+        index_names: Optional[List[str]] = None,
+    ) -> pd.DataFrame:
+        """
+        批量拉取标的的 calc_indexes 实时指标（阶段 9 新增）。
+
+        Args:
+            symbols: 标的列表 ["AAPL.US", ...]
+            index_names: 指标枚举名称（CalcIndex 的属性名），不传用默认 7 个因子指标
+                默认: PeTtmRatio, PbRatio, DividendRatioTtm, TotalMarketValue,
+                     FiveDayChangeRate, HalfYearChangeRate, TurnoverRate
+
+        Returns:
+            DataFrame，columns: symbol + 各字段（snake_case），所有值都是 float
+            缺失数据为 NaN（LongPort 返回 None 时转换）
+        """
+        if not LONGPORT_AVAILABLE:
+            raise RuntimeError("LongPort SDK not available")
+
+        default_names = [
+            "PeTtmRatio", "PbRatio", "DividendRatioTtm", "TotalMarketValue",
+            "FiveDayChangeRate", "HalfYearChangeRate", "TurnoverRate",
+        ]
+        names = index_names or default_names
+        indexes = [getattr(CalcIndex, n) for n in names]
+
+        ctx = self.connect_quote()
+        results = self._retry(ctx.calc_indexes, symbols, indexes)
+
+        # enum name → snake_case 字段名映射
+        # 例如 PeTtmRatio → pe_ttm_ratio
+        def camel_to_snake(s: str) -> str:
+            out = []
+            for i, c in enumerate(s):
+                if c.isupper() and i > 0:
+                    out.append("_")
+                out.append(c.lower())
+            return "".join(out)
+
+        field_names = [camel_to_snake(n) for n in names]
+
+        rows = []
+        for r in results:
+            row = {"symbol": r.symbol}
+            for fname in field_names:
+                v = getattr(r, fname, None)
+                # None / Decimal → float 或 NaN
+                if v is None:
+                    row[fname] = float("nan")
+                else:
+                    try:
+                        row[fname] = float(v)
+                    except (TypeError, ValueError):
+                        row[fname] = float("nan")
+            rows.append(row)
+
+        df = pd.DataFrame(rows)
+        logger.info(f"calc_indexes fetched: {len(df)} symbols × {len(field_names)} fields")
+        return df
 
     # ----------------------------------------------------------
     # Trade API - 交易接口

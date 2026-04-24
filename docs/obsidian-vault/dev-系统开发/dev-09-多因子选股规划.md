@@ -236,3 +236,123 @@ BaseStrategy（保留）
 ---
 
 _文档状态：设计完成，等阶段7 验证后启动实施。_
+
+---
+
+# 📦 V0 实施记录（2026-04-25 凌晨）
+
+## 实施背景
+
+Gavin 在阶段 8 完工后主动要求启动阶段 9，1.5h 限时端到端打通。
+因完整 5 因子模型需要财报数据，本次 V0 做"可行性验证版"。
+
+## 数据能力盘点（关键发现）
+
+> [!warning] LongPort SDK 无财报 API
+> - `QuoteContext` 46 个方法中**没有** `income_statement / balance_sheet / cash_flow`
+> - 原设计的 Quality 因子（ROE、营收增速、净利润率）V0 无法实现
+> - 等未来集成 yfinance / Polygon 等财报源后再补
+
+> [!success] LongPort `calc_indexes` 覆盖 7 个因子指标
+> 经测试确认以下字段可用且一次请求批量返回：
+> - `PeTtmRatio`、`PbRatio`、`DividendRatioTtm`（Value）
+> - `TotalMarketValue`（Size）
+> - `FiveDayChangeRate`、`HalfYearChangeRate`（Momentum）
+> - `TurnoverRate`（Liquidity）
+
+## V0 架构（4 因子）
+
+| 因子 | 权重 | 指标 | 方向 |
+|------|------|------|------|
+| Value | 25% | PE TTM(-) + PB(-) + Dividend(+) | 便宜 + 高分红好 |
+| Momentum | 30% | 5日涨幅(+) + 半年涨幅(+) | 涨得多好 |
+| Size | 15% | log10(市值)(-) | 偏中小盘 |
+| Liquidity | 30% | 换手率(-) | 避免过热炒作股 |
+
+**关键技术点**：
+1. **Winsorized Z-Score**：先用 5%-95% 分位数截断极端值，再 Z-Score，最后 clip 到 [-3, 3]
+   - 28 样本量下避免单个异常值扭曲标准差
+2. **PE < 0 当缺失处理**：亏损公司不应被当成"便宜"
+3. **log 转 Size**：市值单位差异大（万亿 vs 百亿），log 后再归一化
+4. **NaN 填 0**：缺失数据给中性分（不排除标的）
+
+## V0 验证结果（首次运行 2026-04-25 00:13）
+
+**Top-10（共 28 标的打分）**：
+
+| Rank | Symbol | Score | 亮点 | 是否持仓 |
+|------|--------|-------|------|---------|
+| 1 | XOM | +0.66 | Value 0.97（便宜+高股息）| - |
+| 2 | GS | +0.60 | Value 0.80 + Size 1.06 | - |
+| 3 | CAT | +0.59 | Momentum 1.59（半年强势）| - |
+| 4 | KO | +0.50 | 全面均衡，稳健 | - |
+| 5 | TSM | +0.49 | Momentum 1.89 | **✅ 在持** |
+| 6 | JNJ | +0.40 | Value + Liquidity 中上 | - |
+| 7 | MCD | +0.36 | Value 0.90 | - |
+| 8 | BAC | +0.33 | Value 1.01（最便宜）| - |
+| 9 | JPM | +0.32 | 金融低估值 | - |
+| 10 | WMT | +0.25 | 消费龙头 | - |
+
+**现持仓 5 只在多因子中的表现**：
+
+| 持仓 | 多因子 Rank | 总分 | 结论 |
+|------|-------------|------|------|
+| TSM | #5 | +0.49 | ✅ 多因子也看好 |
+| AVGO | #17 | -0.18 | ⚠️ 中下游 |
+| META | #20 | -0.24 | ❌ 偏弱 |
+| MSFT | #22 | -0.34 | ❌ 偏弱 |
+| NVDA | #24 | -0.38 | ❌ 偏弱 |
+
+**关键洞察**：
+1. Momentum 策略买的大盘科技股，在多因子中因 **Size 反向 + Value 差**而排名靠后
+2. 这不代表"策略错了"，而是**不同体系偏好不同**
+3. 两种体系可以**组合使用**：Momentum 抓趋势 + 多因子做价值轮动池
+
+**Bottom 5（合理性检查）**：
+- TSLA -1.05（Value 最差 -1.45）✓ 合理
+- QQQ -0.62（Liquidity 因换手率高被打压，ETF 副作用）⚠️ 需修
+- NVDA/AAPL 在 Bottom 反映 Value 因子严格（PE 高 → 打压）
+
+## 已知问题（V0 遗留）
+
+> [!bug] ETF Liquidity 异常
+> QQQ / SPY / IWM 的换手率天然高（ETF 特性），被 Liquidity 因子严重打压。
+> 未来版本应：
+> 1. 识别 ETF 标的豁免 Liquidity 因子，或
+> 2. 把 watchlist 分为"股票组 + ETF 组"分别打分
+
+> [!todo] 缺少 Quality 因子
+> 接入 yfinance 的 ticker.info（含 returnOnEquity / profitMargins 等）可补足。
+> 需评估是否引入新依赖。
+
+## 交付物
+
+| 文件 | 行数 | 说明 |
+|------|------|------|
+| `src/factor/__init__.py` | 18 | 模块入口 |
+| `src/factor/factor_fetcher.py` | 95 | 数据采集 |
+| `src/factor/factor_scorer.py` | 210 | 核心打分逻辑（含 winsorized Z-Score）|
+| `src/data/longport_client.py` | +80 | 新增 fetch_calc_indexes 方法 |
+| `src/data/database.py` | +120 | 新增 factor_snapshots 表 + 读写方法 |
+| `scripts/run_factor_screen.py` | 240 | CLI 入口 |
+| `output/factor_screen_YYYY-MM-DD.csv/.md` | - | 每次运行产出 |
+
+总计约 **760 行新代码**。
+
+## 升级路径（周末/下周可做）
+
+按优先级排序：
+
+1. **回测验证**（推荐最先做）：Top-10 标的 30 日前瞻回报 vs 基准，看因子有没有 alpha
+2. **ETF Liquidity 豁免**（30 min）
+3. **接 Quality 因子**（yfinance，1-2h）
+4. **集成到 daily-scan**（与 per_symbol 并行产生建议）
+5. **组合优化**（从打分到持仓的转换，含再平衡）
+
+## 关联
+
+- [[dev-04-回测记录]] - 96 次 A/B 回测是 per_symbol 的基础
+- [[dev-08-监控与运维]] - 未来 Dashboard 会加多因子面板
+- [[ln-05_多因子模型基本面]] - 理论来源
+
+**状态**：V0 已落地，等 Paper 再跑 1-2 周 + 多因子 V1（加 Quality）一起进阶段 9.5。
