@@ -1,0 +1,137 @@
+# ============================================================
+# Strategy Configuration
+# ============================================================
+
+# Watchlist - 策略关注的美股标的池
+watchlist:
+  # === 科技（8 只，移除表现差的 CRM）===
+  - "AAPL.US"
+  - "MSFT.US"
+  - "GOOGL.US"
+  - "AMZN.US"
+  - "NVDA.US"
+  - "TSLA.US"
+  - "META.US"
+  - "AMD.US"
+  - "NFLX.US"
+  # === 半导体（2 只）===
+  - "TSM.US"
+  - "AVGO.US"
+  # === 金融（4 只）===
+  - "JPM.US"
+  - "BAC.US"
+  - "GS.US"
+  - "V.US"
+  # === 医疗（2 只，移除 UNH/PFE 表现差）===
+  - "JNJ.US"
+  - "LLY.US"
+  # === 消费（4 只，移除 NKE 表现差）===
+  - "WMT.US"
+  - "COST.US"
+  - "KO.US"
+  - "MCD.US"
+  # === 能源/工业（2 只）===
+  - "XOM.US"
+  - "CAT.US"
+  # === 中概（2 只）===
+  - "BABA.US"
+  - "PDD.US"
+  # === ETF（3 只）===
+  - "SPY.US"
+  - "QQQ.US"
+  - "IWM.US"
+
+# Active strategies - 启用的策略列表
+active_strategies:
+  - "ma_cross"
+  - "rsi"
+  - "momentum"  # 阶段5启用，Paper Trading 跑全量3策略
+
+# ------------------------------------------------------------
+# 均线交叉策略 (MA Cross)
+# ------------------------------------------------------------
+ma_cross:
+  short_period: 5      # 短期均线周期(天)
+  long_period: 20      # 长期均线周期(天)
+  signal_type: "SMA"   # SMA | EMA
+  # 阶段6 可选：量能确认（A/B 显示过滤过严，默认关闭）
+  # 开启效果：过滤 94% 信号、worst_dd 15.4%→5.1%、但年化 -1.47pp、胜率 -18.75pp
+  volume_confirm_enabled: false   # A/B 结论 C 路后回退到 legacy
+  volume_period: 20               # 成交量均线周期(天)
+  volume_multiplier: 1.5          # 启用时：当日量 > 均量 × 1.5 才确认
+  description: "短期均线上穿长期均线买入，下穿卖出"
+
+# ------------------------------------------------------------
+# RSI 反转策略
+# ------------------------------------------------------------
+rsi:
+  period: 14           # RSI 计算周期
+  overbought: 70       # 超买阈值 -> 卖出信号
+  oversold: 30         # 超卖阈值 -> 买入信号
+  # 阶段6 可选：趋势过滤（A/B 显示过滤过严，默认关闭）
+  # 开启效果：过滤 80% 信号、年化 -1.18pp、胜率 -10.91pp
+  trend_filter_enabled: false     # A/B 结论 C 路后回退到 legacy
+  trend_ma_period: 50             # 启用时：需 price > MA50 才买
+  description: "RSI超卖区买入，超买区卖出"
+
+# ------------------------------------------------------------
+# 动量策略 (Momentum)
+# ------------------------------------------------------------
+momentum:
+  lookback_period: 20     # 动量回看周期(天)
+  top_n: 3                # 买入动量最强的N只
+  rebalance_days: 5       # 每N天重新平衡
+  description: "基于N日收益率排序，买入动量最强标的"
+
+# ------------------------------------------------------------
+# Signal Execution
+# ------------------------------------------------------------
+execution:
+  # 信号产生时机：收盘时计算，下一根K线开盘执行
+  signal_on: "close"        # close | realtime
+  execute_on: "next_open"   # next_open | immediate
+  # 是否允许同一标的多策略信号叠加
+  allow_signal_overlap: false
+
+# ------------------------------------------------------------
+# Per-Symbol 策略映射（阶段8 新增）
+# ------------------------------------------------------------
+# 基于 96 次回测结果（`output/watchlist_screen.csv`）为每只标的分配"最佳策略"
+# 未在此列出的标的走 active_strategies（全策略 fallback）
+# 分配原则：取各标的在 4 年日线上 Calmar Ratio 最高的策略
+#
+# 统计分布：RSI 15 只 / Momentum 10 只 / MA Cross 7 只（剔除 CRM/NKE/UNH/PFE 后）
+per_symbol_strategies:
+  # === 🔥 RSI 最佳（反转型标的：大盘蓝筹、医药、ETF）===
+  LLY.US: [rsi]         # Calmar 1.68 胜率 83%
+  V.US: [rsi]           # Calmar 1.33 胜率 100%
+  COST.US: [rsi]        # Calmar 0.99 胜率 100%
+  JPM.US: [rsi]         # Calmar 0.97 胜率 100%
+  SPY.US: [rsi]         # Calmar 0.90 胜率 80%
+  QQQ.US: [rsi]         # Calmar 0.84 胜率 80%
+  GOOGL.US: [rsi]       # Calmar 0.89 胜率 70%
+  AAPL.US: [rsi]        # Calmar 0.79 胜率 82%（Momentum 下亏 6.4% ❗）
+  BAC.US: [rsi]         # Calmar 0.58
+  PDD.US: [rsi]         # Calmar 0.52
+  XOM.US: [rsi]         # Calmar 0.46
+  MCD.US: [rsi]         # Calmar 0.28
+
+  # === 🔥 MA Cross 最佳（趋势型标的）===
+  AMD.US: [ma_cross]    # Calmar 1.65 胜率 55%
+  GS.US: [ma_cross]     # Calmar 1.58 胜率 67%
+  WMT.US: [ma_cross]    # Calmar 0.84 胜率 59%
+  AMZN.US: [ma_cross]   # Calmar 0.70（Momentum 下亏 8.1% ❗）
+  JNJ.US: [ma_cross]    # Calmar 0.58
+  IWM.US: [ma_cross]    # Calmar 0.58
+
+  # === 🔥 Momentum 最佳（高波动型/科技半导体）===
+  TSM.US: [momentum]    # Calmar 0.89 胜率 64%
+  CAT.US: [momentum]    # Calmar 0.75
+  NVDA.US: [momentum]   # Calmar 0.74 胜率 65%
+  NFLX.US: [momentum]   # Calmar 0.68
+  MSFT.US: [momentum]   # Calmar 0.57
+  META.US: [momentum]   # Calmar 0.51
+  AVGO.US: [momentum]   # Calmar 0.38
+  BABA.US: [momentum]   # Calmar 0.30
+  TSLA.US: [momentum]   # Calmar 0.28
+  KO.US: [momentum]     # Calmar 0.22

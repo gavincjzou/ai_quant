@@ -1,0 +1,137 @@
+# ============================================================
+# Risk Management & Backtest Configuration
+# ============================================================
+# 阶段2升级：新增 ATR 动态止损 + 442 分批止盈 + 单笔风险反算仓位
+# 通过 mode 字段切换新旧逻辑，legacy 字段全部保留以便 A/B 对比
+
+# ------------------------------------------------------------
+# Position Sizing - 仓位管理
+# ------------------------------------------------------------
+position:
+  # --- legacy 固定百分比模式 ---
+  mode: "risk_based_atr"           # 阶段5启用：fixed_pct | risk_based_atr | legacy_cash95
+  max_single_position_pct: 0.45    # 单票最大仓位: 45%（阶段5升级：适配 Momentum 4.38% risk 的仓位上限）
+  default_position_pct: 0.10       # 默认单笔仓位: 总资产10%
+  max_total_positions: 5           # 最大持仓数量
+  min_order_amount_usd: 50         # 最小下单金额(美元)
+
+  # --- risk_based_atr 模式专属 ---
+  # 公式: size = (equity × single_trade_risk_pct) / (atr × atr_stop_mult)
+  single_trade_risk_pct: 0.025     # 默认单笔风险预算: 2.5%（阶段5升级，被 per_strategy_overrides 覆盖）
+
+# ------------------------------------------------------------
+# Stop Loss & Take Profit - 止损止盈
+# ------------------------------------------------------------
+stop_loss:
+  # --- 模式切换 ---
+  mode: "atr_442"                  # 阶段5启用：legacy | atr_442
+  
+  # --- legacy 固定百分比模式（保留向后兼容） ---
+  per_trade_stop_loss_pct: 0.05    # 个股止损: -5%
+  per_trade_take_profit_pct: 0.15  # 个股止盈: +15%
+  trailing_stop_enabled: true      # 启用追踪止损
+  trailing_stop_pct: 0.05          # 追踪止损幅度: 5%
+
+  # --- atr_442 模式：ATR 动态止损 + 4-4-2 分批止盈 ---
+  atr_442:
+    atr_period: 14                 # ATR 计算周期（被 per_strategy_overrides 覆盖）
+    atr_stop_mult: 2.0             # 初始止损距离 = 入场价 - ATR × 2.0
+    # 分批止盈档位（Risk/Reward 倍数）：TP1=40% 仓位、TP2=40%、TP3=20%
+    tp1_rr: 1.0                    # TP1 盈亏比：1×ATR 止盈距离
+    tp2_rr: 2.0                    # TP2 盈亏比：2×ATR
+    tp3_rr: 3.0                    # TP3 盈亏比：3×ATR
+    tp1_size_pct: 0.40             # TP1 平仓比例
+    tp2_size_pct: 0.40             # TP2 平仓比例
+    tp3_size_pct: 0.20             # TP3 平仓比例（剩余全平）
+    move_stop_to_breakeven_after_tp1: true  # TP1 触发后止损上移到入场价（保本）
+
+# ------------------------------------------------------------
+# Per-Strategy Overrides - 按策略分级参数
+# ------------------------------------------------------------
+# 设计理念（基于 ln-06 风控笔记 + Gavin 的交易画像问答）：
+# - MA Cross 走中线（持仓 2-8 周），用更大的 ATR 周期和更宽的止盈距离
+# - RSI / Momentum 走短线（持仓 3-10 天），ATR 周期短，快进快出
+per_strategy_overrides:
+  ma_cross:
+    description: "中线趋势跟随，持仓 2-8 周"
+    single_trade_risk_pct: 0.0225  # MA: 2.25%（阶段5扫描最优，worst_dd=14.96% avg_calmar=0.23）
+    atr_period: 20                 # 中线用长周期 ATR
+    atr_stop_mult: 2.5             # 敏感性扫描最优（stop_mult=2.5, tp1_rr=1.5, avg_calmar=0.17）
+    tp1_rr: 1.5                    # 中线 TP1 = 1.5×ATR
+    tp2_rr: 3.0
+    tp3_rr: 4.5
+  rsi:
+    description: "短线均值回归，持仓 3-10 天"
+    single_trade_risk_pct: 0.025   # RSI: 2.5%（阶段5扫描最优，worst_dd=14.21% avg_calmar=0.36）
+    atr_period: 14
+    atr_stop_mult: 2.0
+    tp1_rr: 1.0                    # 短线 TP1 = 1×ATR（快速落袋）
+    tp2_rr: 2.0
+    tp3_rr: 3.0
+  momentum:
+    description: "短线动量追踪，持仓 3-10 天"
+    single_trade_risk_pct: 0.0438  # Momentum: 4.38%（阶段5扫描最优，worst_dd=13.01% avg_calmar=0.36）
+    atr_period: 14
+    atr_stop_mult: 2.0
+    tp1_rr: 1.0
+    tp2_rr: 2.0
+    tp3_rr: 3.5                    # 动量策略愿意等更大盈亏比
+
+# ------------------------------------------------------------
+# Daily & Portfolio Risk Limits - 每日/组合风控
+# ------------------------------------------------------------
+daily_limits:
+  max_daily_loss_pct: 0.03         # 单日最大亏损: 总资产3% -> 触发当日停止交易
+  max_daily_trades: 10             # 单日最大交易笔数
+
+portfolio_limits:
+  max_drawdown_pct: 0.20           # 组合最大回撤: 20% -> 触发熔断
+  max_market_exposure_pct: 1.00    # 单市场最大暴露: 100% (只做美股)
+  allow_overnight: true            # 允许隔夜持仓 (美股 PDT 规则，日内交易有限制)
+  block_earnings_window_days: 1    # 财报日前后N天禁止新开仓
+
+# ------------------------------------------------------------
+# Backtest Settings - 回测参数
+# ------------------------------------------------------------
+backtest:
+  initial_capital: 10000           # 初始资金(美元)
+  
+  # 复权方式
+  adjust_type: "qfq"              # qfq=前复权 | hfq=后复权 | none=不复权
+  
+  # 手续费 (长桥美股标准)
+  commission:
+    type: "per_share"              # per_share | percentage
+    rate: 0.0049                   # 每股 $0.0049
+    min_commission: 0.99           # 最低佣金 $0.99
+    platform_fee: 0.005            # 平台费 每股 $0.005
+  
+  # 滑点
+  slippage:
+    type: "percentage"             # percentage | fixed
+    value: 0.001                   # 0.1%
+  
+  # 信号执行规则
+  execution:
+    no_future_function: true       # 严格禁止未来函数
+    signal_bar: "close"            # 收盘价产生信号
+    execute_bar: "next_open"       # 下一根K线开盘价执行
+  
+  # 交易时段 & 日历
+  calendar:
+    skip_non_trading_days: true    # 跳过非交易日
+    market: "US"                   # 使用美股交易日历
+    data_source: "pandas_market_calendars"  # 交易日历数据源
+  
+  # 绩效指标
+  metrics:
+    - "total_return"               # 总收益率
+    - "annual_return"              # 年化收益率
+    - "max_drawdown"               # 最大回撤
+    - "sharpe_ratio"               # 夏普比率
+    - "sortino_ratio"              # Sortino 比率（下行波动）
+    - "calmar_ratio"               # Calmar 比率（年化/MaxDD）
+    - "win_rate"                   # 胜率
+    - "profit_loss_ratio"          # 盈亏比
+    - "trade_count"                # 总交易次数
+    - "avg_holding_days"           # 平均持仓天数

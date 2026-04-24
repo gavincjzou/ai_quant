@@ -1,0 +1,58 @@
+# Environment
+.env
+.venv/
+venv/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Data
+*.db
+*.sqlite
+data_cache/
+
+# Logs
+logs/
+
+# IDE
+.idea/
+.vscode/
+.codebuddy/
+.workbuddy/
+*.swp
+
+# 项目根目录的 Obsidian 缓存（以根路径锚定，不影响 vault 内的 .obsidian）
+/.obsidian/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local secrets (阶段7: 企业微信 Webhook、邮件授权码等)
+config/*.local.yaml
+config/*.local.yml
+
+# Output (对账报告、告警日志、回测 CSV 不进 git)
+output/
+
+# Obsidian workspace 缓存（学习笔记/dev 文档进 git，但本地缓存不进）
+docs/obsidian-vault/.obsidian/workspace*
+docs/obsidian-vault/.obsidian/cache
+docs/obsidian-vault/.obsidian/types.json
+
+# Test cache
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# 临时文件
+*.tmp
+*.bak
+*~

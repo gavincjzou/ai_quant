@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0/dtd">
+<!--
+=========================================================================
+  launchd 任务：登录 macOS 后 + 每天 21:30 自动跑 Paper Trading 日扫
+  ----------------------------------------------------------------------
+  安装方式：
+      cp scripts/com.gavin.aiquant.plist ~/Library/LaunchAgents/
+      launchctl load ~/Library/LaunchAgents/com.gavin.aiquant.plist
+
+  卸载方式：
+      launchctl unload ~/Library/LaunchAgents/com.gavin.aiquant.plist
+      rm ~/Library/LaunchAgents/com.gavin.aiquant.plist
+
+  查看状态：
+      launchctl list | grep aiquant
+      tail -f /Users/zouchengjiang/ai_quant/logs/launchd.out.log
+
+  注意：
+  - RunAtLoad=true 表示登录系统后立刻跑一次
+  - StartCalendarInterval 表示每天 21:30 跑一次
+  - 脚本本身是幂等的，重复触发不会重复下单
+=========================================================================
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.gavin.aiquant.daily-scan</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/zouchengjiang/ai_quant/run_daily.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/zouchengjiang/ai_quant</string>
+
+    <!-- 登录后立刻跑一次 -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- 每天 21:30 跑一次（本机时区） -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>21</integer>
+        <key>Minute</key>
+        <integer>30</integer>
+    </dict>
+
+    <!-- 标准输出/错误日志 -->
+    <key>StandardOutPath</key>
+    <string>/Users/zouchengjiang/ai_quant/logs/launchd.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/zouchengjiang/ai_quant/logs/launchd.err.log</string>
+
+    <!-- 防止短时间内重复触发 -->
+    <key>ThrottleInterval</key>
+    <integer>300</integer>
+</dict>
+</plist>

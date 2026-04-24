@@ -1,0 +1,54 @@
+# ============================================================
+# AI Quant Trading System - Global Settings
+# ============================================================
+
+system:
+  name: "AI Quant Trading System"
+  version: "1.0.0"
+  trade_mode: "paper"  # paper | live
+  log_level: "INFO"
+
+# ------------------------------------------------------------
+# Market Configuration (US Stock Only)
+# ------------------------------------------------------------
+market:
+  target: "US"
+  timezone: "America/New_York"
+  trading_hours:
+    regular:
+      open: "09:30"
+      close: "16:00"
+    pre_market:
+      open: "04:00"
+      close: "09:30"
+    after_hours:
+      open: "16:00"
+      close: "20:00"
+  enable_extended_hours: false  # 先只做常规时段
+
+# ------------------------------------------------------------
+# Data Settings
+# ------------------------------------------------------------
+data:
+  database_path: "data_cache/quant.db"
+  csv_export_dir: "data_cache/csv"
+  history_days: 365  # 默认拉取1年历史数据
+  kline_periods:
+    - "1d"    # 日K
+    - "1w"    # 周K
+
+# ------------------------------------------------------------
+# Scheduler
+# ------------------------------------------------------------
+scheduler:
+  data_fetch_interval_minutes: 5  # 行情采集间隔(分钟)
+  strategy_run_cron: "0 */30 9-16 * * 1-5"  # 交易时段每30分钟运行策略
+
+# ------------------------------------------------------------
+# LongPort API
+# ------------------------------------------------------------
+longport:
+  # Credentials from .env file
+  throttle_requests_per_second: 5
+  retry_max_attempts: 3
+  retry_delay_seconds: 2

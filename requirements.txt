@@ -1,0 +1,36 @@
+# AI Quant Trading System - Dependencies
+# Core Trading
+longport>=1.0.0
+backtrader>=1.9.78
+
+# Data Analysis
+pandas>=1.5.0
+numpy>=1.23.0
+# pandas-ta removed: not used in codebase and requires Python>=3.12
+
+# Historical Data Source (backup / primary for backtest)
+yfinance>=0.2.28
+
+# Scheduling
+APScheduler>=3.10.0
+
+# Logging
+loguru>=0.7.0
+
+# Configuration
+pydantic>=2.0.0
+pyyaml>=6.0
+python-dotenv>=1.0.0
+
+# Visualization
+matplotlib>=3.7.0
+mplfinance>=0.12.9
+
+# Database
+# SQLite is built-in, no extra package needed
+
+# Timezone
+pytz>=2023.3
+
+# HTTP (for WorkBuddy Skills integration)
+requests>=2.31.0

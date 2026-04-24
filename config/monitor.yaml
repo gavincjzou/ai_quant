@@ -1,0 +1,47 @@
+# ============================================================
+# Monitor / Alerts 配置模板（进 git，只存结构）
+# ------------------------------------------------------------
+# 敏感凭证（Webhook、Token、密码）请写在 monitor.local.yaml（已 gitignore）
+# 加载优先级：环境变量 > monitor.local.yaml > monitor.yaml（本文件）
+# ============================================================
+
+# 告警通道开关与路由
+alerts:
+  # 日志通道（始终启用，落盘到 output/alerts.log）
+  log:
+    enabled: true
+    log_file: null      # null = output/alerts.log
+
+  # 企业微信机器人（推荐，国内友好）
+  wecom:
+    enabled: true
+    # webhook_url: 填在 monitor.local.yaml 里
+    # 或通过环境变量 AIQUANT_WECOM_WEBHOOK 覆盖
+    min_level: "info"                  # info | warning | critical
+    mention_on:                        # 哪些级别 @指定人
+      - "warning"
+      - "critical"
+    mention_users: []                  # 企业微信 userid 列表，如 ["ZouChengJiang"]
+    mention_mobiles: []                # 或手机号列表，如 ["13800138000"]
+    markdown_for_levels:               # 哪些级别使用 markdown 格式
+      - "warning"
+      - "critical"
+
+  # Telegram（保留，国内基本不用）
+  telegram:
+    enabled: false
+    min_level: "info"
+
+  # 邮件（备用）
+  email:
+    enabled: false
+    min_level: "warning"
+    smtp_host: ""
+    smtp_port: 465
+    email_to: []
+
+# 每日运行摘要的推送策略
+daily_summary:
+  enabled: true
+  always_push: true                    # 即使无异常也推一条日报
+  format: "markdown"                   # text | markdown
