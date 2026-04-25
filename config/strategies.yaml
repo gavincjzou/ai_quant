@@ -40,6 +40,15 @@ watchlist:
   - "SPY.US"
   - "QQQ.US"
   - "IWM.US"
+  # === 阶段9 V1 新增：AI/半导体概念股（7 只）===
+  # 追加原因：Gavin 偏好科技热点，原 watchlist 缺半导体纵深 + 软件基建
+  - "ORCL.US"           # 甲骨文（AI 云基建）
+  - "PLTR.US"           # Palantir（AI 应用）
+  - "SMCI.US"           # Super Micro（AI 服务器）
+  - "MU.US"             # 美光（存储芯片）
+  - "MRVL.US"           # Marvell（数据中心芯片）
+  - "QCOM.US"           # 高通（移动/AI 芯片）
+  - "INTC.US"           # 英特尔（CPU/代工）
 
 # Active strategies - 启用的策略列表
 active_strategies:
@@ -135,3 +144,14 @@ per_symbol_strategies:
   BABA.US: [momentum]   # Calmar 0.30
   TSLA.US: [momentum]   # Calmar 0.28
   KO.US: [momentum]     # Calmar 0.22
+
+  # === 阶段9 V1 新增：AI/半导体概念股默认映射 ===
+  # 半导体配 momentum（趋势跟踪为主），软件配 ma_cross（偏长期持有）
+  # 说明：这是初始映射，待 Paper 跑一段时间后根据实盘 Calmar 再调整
+  MU.US: [momentum]     # 存储芯片：周期股 + 动量明显
+  MRVL.US: [momentum]   # 数据中心芯片
+  QCOM.US: [momentum]   # 移动芯片
+  INTC.US: [momentum]   # 周期股：建议配 momentum 捕捉反弹
+  SMCI.US: [momentum]   # AI 服务器：波动极大，适合 momentum
+  ORCL.US: [ma_cross]   # AI 云基建：老牌稳定，适合趋势跟踪
+  PLTR.US: [momentum]   # AI 应用：高波动，适合 momentum
