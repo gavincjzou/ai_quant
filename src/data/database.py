@@ -188,9 +188,16 @@ class DatabaseManager:
                     revenue_growth REAL,
                     net_income_growth REAL,
                     eps_growth REAL,
+                    roe REAL,
                     fetched_at TEXT
                 )
             """)
+
+            # 幂等：老 DB 可能没 roe 字段，add column（IF NOT EXISTS 不支持，用 try）
+            try:
+                cursor.execute("ALTER TABLE fundamental_ratios ADD COLUMN roe REAL")
+            except Exception:
+                pass  # 已存在
 
             # 创建索引
             cursor.execute(

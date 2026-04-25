@@ -359,8 +359,8 @@ class WestockClient:
                     INSERT OR REPLACE INTO fundamental_ratios (
                         symbol, sector, industry, market_cap, beta, company_name,
                         net_margin, gross_margin, operating_margin, debt_to_equity,
-                        revenue_growth, net_income_growth, eps_growth, fetched_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        revenue_growth, net_income_growth, eps_growth, roe, fetched_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         row.get("symbol"),
@@ -375,6 +375,7 @@ class WestockClient:
                         row.get("liability_to_asset"),  # 近似 debt_to_equity
                         None,  # revenue_growth 需要多期对比，未来 V1.5 加
                         None, None,
+                        row.get("roe"),
                         row.get("fetched_at"),
                     ),
                 )
