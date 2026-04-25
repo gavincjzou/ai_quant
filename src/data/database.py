@@ -135,8 +135,13 @@ class DatabaseManager:
                 )
             """)
 
-            # 阶段 9 新增：因子快照表
+            # 阶段 9 V0：因子快照表
             # 存储每日每只标的的原始因子指标 + 归一化得分
+            # 阶段 9 V1 通过 _migrate_factor_snapshots_v1 扩展：
+            #   - 加 version 字段（区分 V0/V1）
+            #   - 加 quality_score / industry_score / sector / industry /
+            #        net_margin / gross_margin / revenue_growth
+            #   - UNIQUE 约束改为 (date, symbol, version)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS factor_snapshots (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -163,6 +168,30 @@ class DatabaseManager:
                 )
             """)
 
+            # 阶段 9 V1 迁移：如果旧表存在，重建为支持 version 的新表
+            self._migrate_factor_snapshots_v1(cursor)
+
+            # 阶段 9 V1 新增：基本面数据缓存表（FMP API 结果）
+            # 节省 FMP 免费 tier 250 次/天的额度
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS fundamental_ratios (
+                    symbol TEXT PRIMARY KEY,
+                    sector TEXT,
+                    industry TEXT,
+                    market_cap REAL,
+                    beta REAL,
+                    company_name TEXT,
+                    net_margin REAL,
+                    gross_margin REAL,
+                    operating_margin REAL,
+                    debt_to_equity REAL,
+                    revenue_growth REAL,
+                    net_income_growth REAL,
+                    eps_growth REAL,
+                    fetched_at TEXT
+                )
+            """)
+
             # 创建索引
             cursor.execute(
                 "CREATE INDEX IF NOT EXISTS idx_kline_symbol_date "
@@ -174,6 +203,96 @@ class DatabaseManager:
             )
 
         logger.info(f"Database initialized: {self.db_path}")
+
+    def _migrate_factor_snapshots_v1(self, cursor):
+        """
+        阶段 9 V1 DB 迁移：factor_snapshots 加 version 字段 + V1 扩展字段。
+
+        SQLite 不支持修改已有表的 UNIQUE 约束，所以采用"表重建"方案：
+        1. 幂等检查（看 version 字段是否已存在），已迁移则跳过
+        2. 老表数据 backup → 建新表（含 V1 全部字段 + UNIQUE(date,symbol,version)）
+        3. 老数据 INSERT 到新表（version 填 'v0'）
+        4. DROP 老表，RENAME 新表
+
+        幂等：已迁移的 DB 只会检查 + skip，不会重复迁移。
+        """
+        # 检查是否已迁移
+        cursor.execute("PRAGMA table_info(factor_snapshots)")
+        existing_cols = {row[1] for row in cursor.fetchall()}
+
+        if "version" in existing_cols:
+            # 已迁移，直接返回
+            return
+
+        logger.info("[Migration] factor_snapshots V1 迁移开始（重建表）")
+
+        # 1. 备份老数据
+        cursor.execute("SELECT * FROM factor_snapshots")
+        old_rows = cursor.fetchall()
+        old_cols = [d[0] for d in cursor.description]
+        logger.info(f"[Migration] 备份 {len(old_rows)} 行老数据，字段: {old_cols}")
+
+        # 2. 建新表（完整 V1 schema）
+        cursor.execute("ALTER TABLE factor_snapshots RENAME TO factor_snapshots_old")
+        cursor.execute("""
+            CREATE TABLE factor_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                date TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                version TEXT NOT NULL DEFAULT 'v0',
+                -- 原始指标（V0 + V1）
+                pe_ttm_ratio REAL,
+                pb_ratio REAL,
+                dividend_ratio_ttm REAL,
+                total_market_value REAL,
+                five_day_change_rate REAL,
+                half_year_change_rate REAL,
+                turnover_rate REAL,
+                -- V1 新增：基本面
+                sector TEXT,
+                industry TEXT,
+                net_margin REAL,
+                gross_margin REAL,
+                revenue_growth REAL,
+                -- 因子得分（V0 4 个 + V1 2 个新增）
+                value_score REAL,
+                momentum_score REAL,
+                size_score REAL,
+                liquidity_score REAL,
+                quality_score REAL,
+                industry_score REAL,
+                total_score REAL,
+                rank INTEGER,
+                -- 元信息
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(date, symbol, version)
+            )
+        """)
+
+        # 3. 老数据灌入（version='v0'）
+        if old_rows:
+            # 老字段列表（不含 id/created_at）
+            common_cols = [c for c in old_cols if c not in ("id", "created_at")]
+            col_str = ", ".join(common_cols) + ", version"
+            placeholder = ", ".join(["?"] * (len(common_cols) + 1))
+
+            insert_rows = []
+            for row in old_rows:
+                # row 是 Row 对象，按 old_cols 取值
+                d = {col: row[i] for i, col in enumerate(old_cols)}
+                vals = [d[c] for c in common_cols] + ["v0"]
+                insert_rows.append(vals)
+
+            cursor.executemany(
+                f"INSERT INTO factor_snapshots ({col_str}) VALUES ({placeholder})",
+                insert_rows,
+            )
+            logger.info(f"[Migration] 老数据 {len(insert_rows)} 行已 backfill 到新表（version='v0'）")
+
+        # 4. 删老表
+        cursor.execute("DROP TABLE factor_snapshots_old")
+
+        logger.info("[Migration] factor_snapshots V1 迁移完成 ✅")
 
     # ----------------------------------------------------------
     # K-line Data CRUD
