@@ -415,13 +415,58 @@ def main():
         if summary.get("skipped_reason"):
             print(f"  skipped:          {summary['skipped_reason']}")
 
+        # 阶段9 V1 Fix：Daily Scan 完成 + 有新数据处理 → 自动跑 V1 因子 + 推送
+        # 触发条件：有 gap 被处理（len(processed) > 0），避免周末无数据时重复跑
+        # 失败不影响主流程
+        import subprocess
+        proj_root = orch.project_root
+
+        v1_ok = False
+        has_processed = bool(summary.get("processed"))
+
+        if not args.dry_run and has_processed:
+            try:
+                print("\n🎯 自动跑 V1 多因子打分...")
+                result = subprocess.run(
+                    [sys.executable, os.path.join(proj_root, "scripts", "run_factor_screen.py"),
+                     "--version", "v1"],
+                    cwd=proj_root,
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                )
+                if result.returncode == 0:
+                    print(f"  ✅ V1 因子快照已更新 → output/factor_screen_*_v1.md")
+                    v1_ok = True
+                else:
+                    print(f"  ⚠️ V1 因子失败（不影响主流程）：{result.stderr[-200:]}")
+            except Exception as e:
+                logger.warning(f"[DailyScan] V1 因子失败（忽略）：{e}")
+
+            # V1 成功 → 推送排名变化（阶段9 V1 集成 Phase C）
+            if v1_ok:
+                try:
+                    from src.factor.factor_notifier import FactorNotifier
+                    from src.monitor.alerts import get_alerter
+                    print("\n📣 推送 V1 Top-10 + 排名变化...")
+                    notifier = FactorNotifier(orch.db, get_alerter())
+                    pushed = notifier.notify()
+                    if pushed:
+                        print(f"  ✅ V1 排名推送完成")
+                    else:
+                        print(f"  ℹ️ V1 推送跳过（可能未配 WeCom webhook 或无变化）")
+                except Exception as e:
+                    logger.warning(f"[DailyScan] V1 排名推送失败（忽略）：{e}")
+                    print(f"  ⚠️ V1 推送失败（不影响主流程）：{e}")
+        elif not has_processed:
+            print("\n⏸️ 无 gap 处理，跳过 V1 因子（周末/无新数据时正常行为）")
+
         # 阶段8 Fix：Daily Scan 完成后自动生成 Dashboard
+        # 必须放在 V1 之后，以便 Dashboard 读到最新 V1 snapshot
         # 失败不影响主流程（只 log warning）
         if not args.dry_run:
             try:
                 print("\n📊 自动生成 Dashboard...")
-                import subprocess
-                proj_root = orch.project_root
                 result = subprocess.run(
                     [sys.executable, os.path.join(proj_root, "scripts", "build_dashboard.py")],
                     cwd=proj_root,
