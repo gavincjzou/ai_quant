@@ -356,3 +356,155 @@ Gavin 在阶段 8 完工后主动要求启动阶段 9，1.5h 限时端到端打�
 - [[ln-05_多因子模型基本面]] - 理论来源
 
 **状态**：V0 已落地，等 Paper 再跑 1-2 周 + 多因子 V1（加 Quality）一起进阶段 9.5。
+
+---
+
+# 🚀 V1 实施记录（2026-04-25 下午）
+
+## 背景
+
+Gavin 凌晨看完 V0 Top-10 反馈：
+1. "AI 驱动时代 PE 低不等于好"——认为 Value 25% 偏重
+2. "偏好科技/AI 热点"——希望 Momentum 提权 + 行业加权
+3. "Bottom-5 不完全认可"——QQQ 被 Liquidity 误伤明显
+4. 实盘持仓 MSFT/META/NVDA/TSM/AVGO 等科技蓝筹，但现 watchlist 缺半导体纵深
+
+## 需求澄清（2 轮 Q&A）
+
+### 关键决策
+- **Watchlist 扩容**：28 → 35（新增 ORCL/PLTR/SMCI/MU/MRVL/QCOM/INTC）
+- **Quality 因子**：启用（净利率+毛利率+营业利润率+ROE）
+- **Industry 因子**：启用（半导体 +1.0σ，AI 基建 +0.8σ，软件互联网 +0.7σ）
+- **ETF 特殊通道**：SPY/QQQ/IWM 跳过 Quality/Liquidity/Industry
+- **权重调整**：Value ↓10%、Momentum ↑5%、Size ↓10%、Liquidity ↓15%、Quality +15%、Industry +15%
+
+## 数据源选型之路（踩坑记录）
+
+| 候选 | 结果 | 备注 |
+|------|------|------|
+| FMP 免费档 | ❌ 59% 覆盖 | 半导体核心 MU/MRVL/QCOM/SMCI 全 402 Premium |
+| FMP v3 endpoint | ❌ 403 | 2025 改版后新账户必须用 /stable |
+| yfinance | ❌ rate limited | IP 被 Yahoo 限流，白天也不行 |
+| Alpha Vantage 免费 | ❌ 25 次/天 | 不够 35 只 |
+| SEC EDGAR | ⚠️ 需 +3h 开发 | XBRL 原始数据解析复杂 |
+| **westock-data** | ✅ **选中** | 腾讯自选股 CLI skill，100% 覆盖 + 真 ROE + 无限调用 |
+
+## V1 架构
+
+### 因子权重对比
+
+| 因子 | V0 | V1 | 变化原因 |
+|------|-----|-----|---------|
+| Value | 25% | **15%** | -10%：AI 时代低 PE ≠ 好 |
+| Momentum | 30% | **35%** | +5%：体现"动量优先"偏好 |
+| Quality | 0% | **15%** | 新增 |
+| Size | 15% | **5%** | -10%：AI 大公司也很强 |
+| Liquidity | 30% | **15%** | -15%：修 ETF 误伤 |
+| Industry | 0% | **15%** | 新增 |
+
+### Quality 子因子（100% 用 Westock）
+- NetMargin 30%：净利率（NVDA 55.8% / LLY 31.7% / MU 22.8%）
+- GrossMargin 20%：毛利率（NVDA 75.0% / LLY 83.0%）
+- OperatingMargin 20%：营业利润率
+- ROE 30%：真 Quality 核心（NVDA 119% / LLY 101% / QCOM 23.3%）
+
+### Industry σ 映射（实测 FMP /stable/profile 校准拼写后）
+| 分类 | bias | 覆盖标的 |
+|------|------|---------|
+| 半导体核心 | +1.0σ | NVDA/AMD/TSM/AVGO/MU/MRVL/QCOM/INTC |
+| AI 基建硬件 | +0.8σ | SMCI（Westock 数据缺失时 fallback）|
+| 软件/互联网 | +0.7σ | MSFT/GOOGL/META/ORCL/PLTR |
+| 消费电子 | +0.3σ | AAPL |
+| 娱乐/电商/其他 | 0σ | NFLX/AMZN/TSLA |
+| 非科技 | 0σ | 金融/医药/能源/消费 |
+
+### ETF 特殊通道
+SPY/QQQ/IWM 跳过 Quality/Liquidity/Industry，只用 **Value 30% + Momentum 50% + Size 20%**。
+修复 V0 的 ETF 天然换手率高被误伤的 bug（QQQ 从 V0 的 -2.70 Liquidity → V1 正常 0.00）。
+
+## 实施结果
+
+### V1 Top-10（2026-04-25）
+
+| Rank | Symbol | 总分 | Quality | Industry | Momentum | 亮点 |
+|------|--------|------|---------|----------|----------|------|
+| 1 | **MU** | +0.65 | -0.28 | +1.0 | +1.96 | 半导体存储+强势动量 |
+| 2 | **TSM** | +0.59 | +0.91 | +1.0 | +0.79 | 半导体代工王 |
+| 3 | **INTC** | +0.55 | -1.25 | +1.0 | +2.55 | 动量极强（反弹）|
+| 4 | **MRVL** | +0.53 | -1.21 | +1.0 | +2.32 | 数据中心芯片 |
+| 5 | IWM | +0.52 | - | - | +0.47 | ETF 小盘反弹 |
+| 6 | CAT | +0.32 | -0.43 | 0.0 | +0.94 | 工业动量 |
+| 7 | **GOOGL** | +0.26 | +0.41 | +0.7 | +0.24 | 互联网巨头 |
+| 8 | **NVDA** | +0.26 | +1.96 | +1.0 | +0.04 | Quality 顶级 ROE 119% |
+| 9 | KO | +0.25 | +0.39 | 0.0 | -0.09 | 稳健消费 |
+| 10 | JNJ | +0.20 | +0.33 | 0.0 | -0.18 | 稳健医药 |
+
+### V0 vs V1 对照
+- **V1 新进**：MU(#1)/TSM(#2)/INTC(#3)/MRVL(#4)/NVDA(#8)/GOOGL(#7)/IWM(#5)
+- **V0 掉出**：BAC/GS/JPM/MCD/WMT/XOM（全部是非科技股）
+- 完美体现"AI 热点偏好"
+
+### 回看回测结果（29 交易日 vs QQQ +6.50%）
+
+| 指标 | V1 Top-10 | V0 Top-10 | 赢家 |
+|------|-----------|-----------|------|
+| 累计收益 | **+13.70%** | +11.96% | V1 ✅ |
+| 超额收益 | **+7.21%** | +5.46% | V1 ✅ |
+| Alpha | +5.25% | **+6.04%** | V0 ✅ |
+| Beta | 1.30 | **0.91** | V0 ✅ |
+| Sharpe | 3.57 | **4.20** | V0 ✅ |
+| 最大回撤 | -8.53% | **-4.81%** | V0 ✅ |
+| 胜率 | **65.5%** | 62.1% | V1 ✅ |
+
+**结论**：
+- 两者都有显著 alpha，因子体系**都有效**
+- V1 收益更高但波动更大（Beta 1.30）
+- V0 风险调整收益更好（Sharpe 4.20，Alpha 反而更高）
+- **选 V0 还是 V1 取决于风格偏好**——激进派选 V1，稳健派选 V0
+
+## 交付物
+
+### 新代码
+| 文件 | 行数 | 说明 |
+|------|------|------|
+| `src/data/fmp_client.py` | 370 | FMP 备份数据源（未启用）|
+| `src/data/westock_client.py` | 360 | Westock CLI 封装（主数据源）|
+| `src/factor/industry_map.py` | 180 | 中文/英文/硬编码三级行业映射 |
+| `src/factor/v1_scorer.py` | 230 | V1Scorer 六因子打分 + ETF 通道 |
+| `scripts/download_v1_kline.py` | 120 | 7 新标的 K 线下载 |
+| `scripts/backtest_factor_screen.py` | 330 | 回看回测 |
+| **合计** | **~1600 行** | |
+
+### 修改
+| 文件 | 说明 |
+|------|------|
+| `src/data/database.py` | migration + factor_snapshots 加 version 字段 + ROE 字段 |
+| `src/factor/__init__.py` | 导出 V1Scorer/get_industry_bias |
+| `src/factor/factor_fetcher.py` | 新增 fetch_v1 合并双数据源 |
+| `scripts/run_factor_screen.py` | 支持 --version v0/v1 切换 + V1 专属 Markdown 渲染 |
+| `config/strategies.yaml` | watchlist 扩 7 只 + per_symbol 映射 |
+
+### 产出
+- `output/factor_screen_2026-04-25_v1.csv/.md`
+- `output/factor_screen_2026-04-25.csv/.md`（V0 同步 35 只版本）
+- `output/backtest_v1_top10_2026-04-25.md`
+- `output/backtest_v0_top10_2026-04-25.md`
+- SQLite `factor_snapshots`: 35×V1 + 35×V0 双份记录
+- SQLite `fundamental_ratios`: 35 条 Westock 缓存
+
+## V1 遗留问题（未来迭代）
+
+> [!todo] V1.5 方向
+> 1. **每日跑因子快照**：集成到 daily-scan 里，积累 3 个月后做真正 forward backtest
+> 2. **Revenue Growth 因子**：westock 多期对比算，补足"成长性"
+> 3. **组合优化**：Top-N 到持仓的转换（当前 V1 纯只读分析）
+> 4. **分行业权重限制**：避免 Top-10 集中在半导体一个赛道
+> 5. **MCD ROE 解析**：修 balance section 的 MD 表解析 edge case
+
+## 关联
+
+- [[dev-04-回测记录]] - 96 次 A/B 回测基础
+- [[ln-05_多因子模型基本面]] - 理论来源
+- [[dev-08-监控与运维]] - 未来 Dashboard 加多因子面板
+
+**状态**：V1 已落地，等 Gavin 决定是否每日跑 + 是否按 V1 Top-N 进行持仓轮换。
