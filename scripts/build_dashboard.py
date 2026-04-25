@@ -210,7 +210,62 @@ def collect_dashboard_data(project_root: str) -> Dict[str, Any]:
     data["watchlist_total"] = len(cfg.get("watchlist", []))
     data["per_symbol_count"] = len(cfg.get("per_symbol_strategies", {}) or {})
 
+    # 9. 阶段 9 V1：多因子 Top-5（从 factor_snapshots 表读）
+    data["factor_v1"] = load_factor_v1_top(db, top_n=5)
+
     return data
+
+
+def load_factor_v1_top(db: DatabaseManager, top_n: int = 5) -> Dict[str, Any]:
+    """
+    加载 V1 因子的 Top-N + 上一次快照用于算排名 delta。
+
+    Returns:
+        {
+            "snapshot_date": "2026-04-25",  # 最新快照日期（None 表示无数据）
+            "prev_date": "2026-04-24",       # 上一份快照日期（用于 delta）
+            "top": [{"rank": 1, "symbol": "MU.US", ...}, ...],
+            "prev_ranks": {"MU.US": 3, ...}  # 上次排名（全量），用于画 delta
+        }
+    """
+    result = {"snapshot_date": None, "prev_date": None, "top": [], "prev_ranks": {}}
+    try:
+        with db._get_conn() as conn:
+            # 关键修正：按 DISTINCT date 取前 2 个日期（同一天多次 save 不算不同）
+            cur = conn.execute(
+                """SELECT DISTINCT date FROM factor_snapshots
+                   WHERE version='v1' ORDER BY date DESC LIMIT 2"""
+            )
+            dates = [r[0] for r in cur.fetchall()]
+            if not dates:
+                return result
+
+            result["snapshot_date"] = dates[0]
+            if len(dates) >= 2:
+                result["prev_date"] = dates[1]
+
+            # Top-N（最新日期）
+            cur = conn.execute(
+                """SELECT symbol, rank, total_score, quality_score, industry_score,
+                          momentum_score, value_score, sector, industry
+                   FROM factor_snapshots
+                   WHERE version='v1' AND date=?
+                   ORDER BY rank ASC LIMIT ?""",
+                (dates[0], top_n),
+            )
+            result["top"] = [dict(r) for r in cur.fetchall()]
+
+            # 上次排名（全量，用于算 delta）
+            if result["prev_date"]:
+                cur = conn.execute(
+                    """SELECT symbol, rank FROM factor_snapshots
+                       WHERE version='v1' AND date=?""",
+                    (result["prev_date"],),
+                )
+                result["prev_ranks"] = {r[0]: r[1] for r in cur.fetchall()}
+    except Exception as e:
+        logger.warning(f"[Dashboard] load_factor_v1_top 失败: {e}")
+    return result
 
 
 def build_equity_curve(db: DatabaseManager, initial: float, trades: list) -> list:
@@ -749,6 +804,12 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     </div>
   </div>
 
+  <!-- ========== 2.5 阶段 9 V1：多因子 Top-5 面板 ========== -->
+  <div class="card" style="margin-bottom: 22px;">
+    <h2>🎯 V1 FACTOR TOP-5 <span class="badge">{factor_v1_badge}</span></h2>
+    {factor_v1_table}
+  </div>
+
   <!-- ========== 3. 持仓概览（饼图 + 表格）========== -->
   <div class="grid grid-2" style="margin-bottom: 22px;">
     <div class="card">
@@ -1148,6 +1209,85 @@ def render_strategy_table(stats: list) -> str:
         f"<tbody>{''.join(rows)}</tbody></table>"
     )
 
+
+def render_factor_v1_table(factor_data: Dict[str, Any], positions_symbols: set) -> str:
+    """
+    渲染 V1 因子 Top-5 表格（阶段 9 V1 生产化集成）。
+
+    - 展示 rank / symbol / 总分 / Quality / Industry / Momentum
+    - 排名 delta 箭头（↑ 上升 ≥3 名绿色 / ↓ 下降 ≥3 名红色 / → 新进）
+    - 持仓标识 ✓
+    - 空态提示
+    """
+    top = factor_data.get("top", [])
+    prev_ranks = factor_data.get("prev_ranks", {})
+    prev_date = factor_data.get("prev_date")
+
+    if not top:
+        return (
+            "<p style='color: var(--color-text-muted); text-align: center; "
+            "padding: 30px 0; font-family: monospace;'>"
+            "⏳ // NO V1 FACTOR DATA — 等待下次 daily-scan 生成快照"
+            "</p>"
+        )
+
+    rows = []
+    for r in top:
+        sym = r["symbol"]
+        rank = int(r["rank"])
+        in_pos = '<span class="check">●</span>' if sym in positions_symbols else ""
+
+        # 排名 delta（需要 prev_date 才算）
+        delta_html = ""
+        if prev_date:
+            if sym in prev_ranks:
+                prev_r = prev_ranks[sym]
+                delta = prev_r - rank  # 上升 delta > 0
+                if delta >= 3:
+                    delta_html = f'<span style="color: var(--color-down);">↑{delta}</span>'
+                elif delta <= -3:
+                    delta_html = f'<span style="color: var(--color-up);">↓{abs(delta)}</span>'
+                elif delta != 0:
+                    delta_html = f'<span style="color: var(--color-text-muted);">{"↑" if delta>0 else "↓"}{abs(delta)}</span>'
+                else:
+                    delta_html = '<span style="color: var(--color-text-muted);">=</span>'
+            else:
+                delta_html = '<span style="color: var(--color-cyan);">NEW</span>'
+
+        # 得分颜色
+        total = r.get("total_score", 0) or 0
+        quality = r.get("quality_score", 0) or 0
+        industry = r.get("industry_score", 0) or 0
+        momentum = r.get("momentum_score", 0) or 0
+
+        def fmt_score(v):
+            css = "up" if v > 0 else ("down" if v < 0 else "neutral")
+            return f'<span class="{css}">{v:+.2f}</span>'
+
+        rows.append(
+            f"<tr>"
+            f"<td><strong>#{rank}</strong> {delta_html}</td>"
+            f"<td><strong>{sym}</strong></td>"
+            f"<td class='num'>{fmt_score(total)}</td>"
+            f"<td class='num'>{fmt_score(quality)}</td>"
+            f"<td class='num'>{fmt_score(industry)}</td>"
+            f"<td class='num'>{fmt_score(momentum)}</td>"
+            f"<td>{in_pos}</td>"
+            f"</tr>"
+        )
+
+    return (
+        "<table>"
+        "<thead><tr>"
+        "<th>排名</th><th>标的</th>"
+        "<th class='num'>总分</th><th class='num'>Quality</th>"
+        "<th class='num'>Industry</th><th class='num'>Momentum</th>"
+        "<th>持仓</th>"
+        "</tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody></table>"
+    )
+
+
 def render_trades_timeline(trades: list, limit: int = 50) -> str:
     if not trades:
         return "<p style='color: #999; text-align: center; padding: 20px;'>无交易记录</p>"
@@ -1216,6 +1356,19 @@ def render_html(data: Dict[str, Any]) -> str:
         stop_loss_table=render_stop_loss_table(data["stop_loss"]),
         strategy_table=render_strategy_table(data["strategy_stats"]),
         trades_timeline=render_trades_timeline(data["trades"]),
+
+        # 阶段 9 V1：多因子 Top-5 面板
+        factor_v1_table=render_factor_v1_table(
+            data["factor_v1"],
+            {p["symbol"] for p in data["positions"]},
+        ),
+        factor_v1_badge=(
+            f'{data["factor_v1"]["snapshot_date"]}'
+            + ("" if data["factor_v1"]["snapshot_date"] == datetime.now().strftime("%Y-%m-%d")
+               else " ⚠️ 滞后")
+            if data["factor_v1"].get("snapshot_date")
+            else "NO DATA"
+        ),
 
         # JS 数据注入
         equity_data_json=json.dumps(data["equity_curve"]),
