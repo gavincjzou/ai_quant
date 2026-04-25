@@ -508,3 +508,88 @@ SPY/QQQ/IWM 跳过 Quality/Liquidity/Industry，只用 **Value 30% + Momentum 50
 - [[dev-08-监控与运维]] - 未来 Dashboard 加多因子面板
 
 **状态**：V1 已落地，等 Gavin 决定是否每日跑 + 是否按 V1 Top-N 进行持仓轮换。
+
+---
+
+# 🔄 V1 生产化集成（2026-04-25 下午晚）
+
+## 目标
+
+V1 从"手动跑的只读分析工具"升级为**每个工作日自动跑 + 可视化 + 企微推送**的闭环产品能力。
+
+## 完整链路
+
+```mermaid
+graph TB
+    A[launchd 21:30 触发] --> B[run_paper_trade.py --daily-scan]
+    B --> C{有 gap 被处理?}
+    C -->|否| Z[跳过 V1，仅 Dashboard]
+    C -->|是| D[📡 subprocess 跑 run_factor_screen.py --version v1]
+    D --> E[factor_snapshots 入库 version='v1']
+    E --> F[📣 FactorNotifier 对比前后 snapshot]
+    F --> G[首次基线 or Top-5+排名变化]
+    G --> H[AlertManager 推企微 Markdown]
+    H --> I[📊 build_dashboard.py 读最新 V1]
+    I --> J[Dashboard V1 FACTOR TOP-5 面板刷新]
+
+    style D fill:#ffe1e1
+    style F fill:#e1f5ff
+    style I fill:#e1ffe1
+```
+
+## 关键设计决策
+
+> [!note] 触发条件用 `has_processed` 而非 `is_trading_day(today)`
+> 原计划用"今天是工作日"判断，但会踩坑：
+> - 本地时间 vs 美东时间会错位（北京周六凌晨 ≈ 美东周五晚）
+> - 节假日美股休市但本地是工作日，判断会错
+>
+> **正确做法**：用 `len(summary['processed']) > 0` —— 语义是"本次 daily-scan 实际处理了新数据"。
+> 这样周末跑/重复跑（无 gap）会自动跳过，有新数据才会推进 V1。
+
+> [!note] FactorNotifier 按 DISTINCT date 取快照
+> V1 snapshot 可能同一天写多次（测试时 + 定时运行），如果按 `LIMIT 2` 取 record 会永远返回同一天。
+> 用 `SELECT DISTINCT date FROM factor_snapshots WHERE version='v1' ORDER BY date DESC LIMIT 2` 保证取的是"前两个不同日期"。
+
+> [!note] 三级失败降级
+> | 层级 | 失败场景 | 后果 |
+> |------|---------|------|
+> | V1 factor | subprocess 超时/非 0 | log warning，Dashboard 读不到新 V1 但不 break |
+> | FactorNotifier | 企微未配 webhook / AlertManager.send 异常 | log warning，不影响 factor 入库 |
+> | Dashboard | 读 V1 失败 | render 空态提示"⏳ 等待下次 daily-scan 生成"|
+
+> [!note] 首次基线 vs 常规 diff
+> - 第 1 次跑（DB 里只有 1 个 V1 date）→ "首次基线"模式，推 Top-10 名单 + 说明"从下次开始追踪变化"
+> - 第 2+ 次跑 → "常规 diff"模式，推 Top-5 + 新进/掉出/单标的排名变动 ≥5 名
+
+## 代码位置
+
+| 文件 | 职责 |
+|------|------|
+| `scripts/run_paper_trade.py:418-470` | V1 + FactorNotifier hook 点 |
+| `scripts/build_dashboard.py:load_factor_v1_top` | 读 V1 快照 + prev 排名 |
+| `scripts/build_dashboard.py:render_factor_v1_table` | 渲染 Top-5 + delta 箭头 |
+| `src/factor/factor_notifier.py` | 全新模块，单一职责 |
+
+## 实施结果
+
+- **4 个 commit** 全部推送到 GitHub：
+  - `50afca3` feat(s9v1-prod-A): V1 集成 daily-scan
+  - `b2564db` feat(s9v1-prod-B): Dashboard V1 面板
+  - `477da35` feat(s9v1-prod-C): FactorNotifier 推送
+  - （最终 docs commit 即将推送）
+- **新增代码**：~450 行
+- **端到端验证**：Gap 2 天 → V1 触发 → 首次基线推送 → Dashboard 刷新，全链路 <5s
+
+## 未来收获
+
+**每天自动跑 V1 后，3 个月后可做真正的 forward backtest**（不是 lookback）：
+- 每天 factor_snapshots 累加一条记录
+- 3 个月 ≈ 60 个交易日快照
+- 可做严格的"过去选出的 Top-N × 未来实际收益"验证
+- 验证因子体系是否真有前瞻性 alpha
+
+## 关联
+
+- [[dev-08-监控与运维]] - 企微告警通道
+- [[dev-09-多因子选股规划]] 的前 3 章 - V0/V1 实施背景
