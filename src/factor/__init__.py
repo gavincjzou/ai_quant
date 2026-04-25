@@ -20,5 +20,7 @@ from src.factor.factor_fetcher import FactorFetcher
 from src.factor.factor_scorer import FactorScorer
 from src.factor.v1_scorer import V1Scorer
 from src.factor.industry_map import get_industry_bias
+from src.factor.factor_notifier import FactorNotifier
 
-__all__ = ["FactorFetcher", "FactorScorer", "V1Scorer", "get_industry_bias"]
+__all__ = ["FactorFetcher", "FactorScorer", "V1Scorer", "get_industry_bias",
+           "FactorNotifier"]
