@@ -2,10 +2,19 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0/dtd">
 <!--
 =========================================================================
-  launchd 任务：登录 macOS 后 + 每天 21:30 自动跑 Paper Trading 日扫
+  launchd 任务：登录 macOS 后 + 每天 08:00 北京时间自动跑 Paper Trading 日扫
   ----------------------------------------------------------------------
+  时间策略（2026-04-27 调整）：
+      - 北京 08:00 ≈ 美东 19:00-20:00 前一天（夏令时/冬令时切换可覆盖）
+      - 美股已收盘 4 小时，最近交易日数据稳定可拉
+      - 用户起床后即可在企微看到推送（包含心跳/V1 排名变化）
+
+      （原 21:30 是错的：北京 21:30 = 美东 09:30 当天，美股早盘开盘期，
+       last_closed_trading_day 仍是前一天，永远 0 gap 空转）
+
   安装方式：
       cp scripts/com.gavin.aiquant.plist ~/Library/LaunchAgents/
+      launchctl unload ~/Library/LaunchAgents/com.gavin.aiquant.plist 2>/dev/null
       launchctl load ~/Library/LaunchAgents/com.gavin.aiquant.plist
 
   卸载方式：
@@ -17,8 +26,8 @@
       tail -f /Users/zouchengjiang/ai_quant/logs/launchd.out.log
 
   注意：
-  - RunAtLoad=true 表示登录系统后立刻跑一次
-  - StartCalendarInterval 表示每天 21:30 跑一次
+  - RunAtLoad=true 表示登录系统后立刻跑一次（用于首次安装/电脑重启验证）
+  - StartCalendarInterval 每天 08:00 跑一次
   - 脚本本身是幂等的，重复触发不会重复下单
 =========================================================================
 -->
@@ -35,17 +44,17 @@
     <key>WorkingDirectory</key>
     <string>/Users/zouchengjiang/ai_quant</string>
 
-    <!-- 登录后立刻跑一次 -->
+    <!-- 登录后立刻跑一次（首次安装 / 电脑重启时验证） -->
     <key>RunAtLoad</key>
     <true/>
 
-    <!-- 每天 21:30 跑一次（本机时区） -->
+    <!-- 每天 08:00 北京时间跑一次（≈ 美东 19-20:00 前一天，盘后 4h） -->
     <key>StartCalendarInterval</key>
     <dict>
         <key>Hour</key>
-        <integer>21</integer>
+        <integer>8</integer>
         <key>Minute</key>
-        <integer>30</integer>
+        <integer>0</integer>
     </dict>
 
     <!-- 标准输出/错误日志 -->
