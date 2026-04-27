@@ -316,17 +316,98 @@ class PaperTradingOrchestrator:
         return summary
 
     def _send_daily_scan_summary(self, summary: dict, dry_run: bool = False):
-        """推送日扫摘要到企业微信（markdown 格式）。"""
+        """推送日扫摘要到企业微信（markdown 格式）。
+
+        两种模式：
+        - 0 gap（skipped_reason 非空）：心跳模式，含当前 ET/CN 时间 + 持仓 + 下次时间
+        - 有 gap：原有摘要表格 + 各日期处理结果
+        """
         title = "📊 日线扫描" + ("（Dry Run）" if dry_run else "")
+        skipped = summary.get("skipped_reason")
+
+        if skipped:
+            # ========== 0 gap 心跳模式（增强版）==========
+            try:
+                import pytz
+                et_tz = pytz.timezone("America/New_York")
+                cn_tz = pytz.timezone("Asia/Shanghai")
+                now_utc = datetime.now(pytz.UTC)
+                et_now = now_utc.astimezone(et_tz).strftime("%Y-%m-%d %H:%M %Z")
+                cn_now = now_utc.astimezone(cn_tz).strftime("%Y-%m-%d %H:%M CST")
+            except Exception:
+                et_now = "(N/A)"
+                cn_now = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+            # 读账户和持仓
+            try:
+                acct = self.trading_state.get("paper.account") or {}
+                positions = self.trading_state.get("paper.positions") or {}
+                cash = float(acct.get("cash", 0))
+                market_value = sum(
+                    float(p.get("market_value", 0)) for p in positions.values()
+                )
+                total_assets = cash + market_value
+            except Exception as e:
+                logger.warning(f"[心跳] 读 trading_state 失败: {e}")
+                acct, positions, cash, market_value, total_assets = {}, {}, 0, 0, 0
+
+            lines = [f"### 💚 {title} - 心跳"]
+            lines.append("")
+            lines.append(f"> 美东 `{et_now}` · 北京 `{cn_now}`")
+            lines.append("")
+            lines.append("**📊 系统状态**")
+            lines.append(f"- 总资产：${total_assets:,.2f}")
+            lines.append(f"- 现金：${cash:,.2f}")
+            lines.append(f"- 持仓市值：${market_value:,.2f}（{len(positions)} 只）")
+            lines.append("")
+            lines.append("**ℹ️ 跳过原因**")
+            lines.append(f"> {skipped}")
+            lines.append("")
+
+            # 持仓 Top-5（按浮盈% 倒序）
+            if positions:
+                pos_with_pct = []
+                for sym, p in positions.items():
+                    cost_basis = float(p.get("avg_cost", 0)) * float(p.get("quantity", 0))
+                    upnl = float(p.get("unrealized_pnl", 0))
+                    pct = upnl / cost_basis if cost_basis > 0 else 0.0
+                    pos_with_pct.append((sym, p, pct))
+                pos_with_pct.sort(key=lambda x: x[2], reverse=True)
+
+                lines.append("**📦 当前持仓 Top-5**")
+                lines.append("| Symbol | 数量 | 现价 | 浮盈% |")
+                lines.append("|---|---|---|---|")
+                for sym, p, pct in pos_with_pct[:5]:
+                    qty = int(p.get("quantity", 0))
+                    cur = float(p.get("current_price", 0))
+                    emoji = "🟢" if pct > 0 else ("🔴" if pct < -0.005 else "⚪")
+                    lines.append(f"| {sym} | {qty} | ${cur:.2f} | {emoji} {pct:+.2%} |")
+                lines.append("")
+
+            lines.append("**⏰ 下次运行**")
+            lines.append("- 每天北京 `08:00`（≈ 美东盘后 4h）")
+            lines.append("")
+            lines.append(f"_{summary.get('started_at', '')}_")
+
+            text_version = (
+                f"{title} - 心跳 | 总资产 ${total_assets:,.0f} · "
+                f"持仓 {len(positions)} 只 · {skipped}"
+            )
+            self.alerter.info(
+                text_version,
+                title="日线扫描心跳",
+                tags=["daily_scan", "heartbeat"],
+                markdown="\n".join(lines),
+            )
+            return
+
+        # ========== 有 gap 处理：原逻辑 ==========
         lines = [f"### {title}"]
         lines.append(f"- 上次扫描：`{summary['last_scan_before'] or '(首次)'}`")
         lines.append(f"- 目标日期：`{summary['target_date']}`")
         lines.append(f"- Gap 天数：{len(summary['gap_days'])}")
 
-        if summary.get("skipped_reason"):
-            lines.append("")
-            lines.append(f"> ℹ️ {summary['skipped_reason']}")
-        elif summary["processed"]:
+        if summary["processed"]:
             lines.append("")
             lines.append("| 日期 | 成交 | 持仓 | 累计收益 | 异常 |")
             lines.append("|---|---|---|---|---|")
