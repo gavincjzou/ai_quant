@@ -119,6 +119,15 @@ class PositionSizer:
             )
         elif effective_mode == "equal_weight":
             amount = total_assets / max(self._max_positions, 1)
+        elif effective_mode == "vol_parity":
+            # 阶段 11 P1-1：波动率反比模式
+            # 高波动标的仓位变小，低波动标的仓位变大，组合波动趋于平衡
+            amount = self._calc_vol_parity(
+                price=price,
+                total_assets=total_assets,
+                existing_position_value=existing_position_value,
+                atr=atr,
+            )
         else:
             amount = total_assets * self._default_pct
 
@@ -232,6 +241,57 @@ class PositionSizer:
         half_kelly = kelly / 2
         half_kelly = min(half_kelly, self._max_single_pct)
         return total_assets * half_kelly
+
+    def _calc_vol_parity(
+        self,
+        price: float,
+        total_assets: float,
+        existing_position_value: float,
+        atr: Optional[float],
+    ) -> float:
+        """阶段 11 P1-1：波动率反比模式（vol-parity）。
+
+        语义：高 ATR 标的仓位变小，低 ATR 标的仓位变大，让组合各标的的"风险贡献"接近一致。
+
+        公式：
+            actual_vol_pct = ATR / price        （标的的"日波动百分比"）
+            target_vol_pct = config.target_vol_pct (默认 3%)
+            multiplier = target_vol_pct / actual_vol_pct
+            adjusted_pct = default_pct × multiplier
+            （受 max_single_pct 上限和 0.5*default_pct 下限保护）
+
+        ATR 缺失时退化到 fixed_pct。
+        """
+        if not atr or atr <= 0 or price <= 0:
+            # 退化：无 ATR 数据 → 走 fixed_pct
+            logger.debug("[vol_parity] ATR 缺失，退化到 fixed_pct")
+            return self._calc_fixed_pct(total_assets, existing_position_value)
+
+        actual_vol_pct = atr / price
+        # target_vol_pct 可在 root_config 配，默认 3%
+        target_vol_pct = (
+            self._root_config.get("position", {})
+            .get("vol_parity", {})
+            .get("target_vol_pct", 0.03)
+        )
+        multiplier = target_vol_pct / max(actual_vol_pct, 1e-6)
+
+        adjusted_pct = self._default_pct * multiplier
+
+        # 边界保护：最小 0.5×default（避免高波动几乎不下单），最大 max_single_pct
+        adjusted_pct = max(self._default_pct * 0.5, adjusted_pct)
+        adjusted_pct = min(self._max_single_pct, adjusted_pct)
+
+        target = total_assets * adjusted_pct
+        # 已有持仓扣减（同 _calc_fixed_pct 语义）
+        remaining = total_assets * self._max_single_pct - existing_position_value
+        amount = min(target, max(0.0, remaining))
+
+        logger.debug(
+            f"[vol_parity] price={price:.2f} ATR={atr:.2f} vol_pct={actual_vol_pct:.2%} "
+            f"mult={multiplier:.2f} adjusted_pct={adjusted_pct:.2%} amount=${amount:.0f}"
+        )
+        return amount
 
     def get_equal_weight_size(
         self,

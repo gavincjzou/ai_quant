@@ -90,6 +90,11 @@ portfolio_limits:
   allow_overnight: true            # 允许隔夜持仓 (美股 PDT 规则，日内交易有限制)
   block_earnings_window_days: 1    # 财报日前后N天禁止新开仓
 
+  # 阶段 11 P1-2 新增：行业集中度限制
+  # 防止 V1 Top-N 全是同行业（如半导体）时一次性买入导致单行业过度暴露
+  max_sector_concentration: 0.40       # 单 sector（如"电子技术"）最大占组合比例: 40%
+  max_industry_concentration: 0.25     # 单 industry（如"半导体"）最大占组合比例: 25%
+
 # ------------------------------------------------------------
 # Backtest Settings - 回测参数
 # ------------------------------------------------------------

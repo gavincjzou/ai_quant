@@ -133,20 +133,13 @@ class TestCircuitBreaker(unittest.TestCase):
         self.assertFalse(result.passed)
         self.assertTrue(any("breaker" in r.lower() for r in result.rejected_reasons))
 
-    def test_breaker_does_not_block_sells_TODO(self):
-        """[KNOWN ISSUE] 熔断后理论上卖出仍应放行（清仓/止损不应被拦）
-
-        现状：check_order 把 circuit_breaker 检查放在 BUY/SELL 分支前，
-              导致熔断后所有信号（含 SELL）全被拒。
-        影响：触发熔断时无法主动清仓，止损靠 StopLossManager 旁路，但风险被人为放大。
-        建议：把 `if circuit_breaker` 块挪到 BUY 分支内，让 SELL 永远放行。
-        本测试当前接受现状（验证当前真实行为）。
-        """
+    def test_breaker_does_not_block_sells(self):
+        """阶段 11 P1-7 修复后：熔断后 SELL 应放行（清仓/止损不能被熔断挡）"""
         self.rm._is_circuit_breaker = True
         sell = TradeSignal(symbol="AAPL.US", signal=Signal.SELL, price=150.0, quantity=10, strategy_name="test")
         result = self.rm.check_order(sell, {"total_assets": 10000, "available_cash": 10000}, {})
-        # TODO 当前行为：SELL 也被拒；未来修复后应 assertTrue(result.passed)
-        self.assertFalse(result.passed)
+        self.assertTrue(result.passed, "熔断后 SELL 应放行")
+        self.assertEqual(result.approved_quantity, 10)
 
     def test_manual_reset(self):
         """手动重置应解除熔断"""
@@ -216,6 +209,135 @@ class TestPersistence(unittest.TestCase):
     def test_load_empty_is_noop(self):
         ok = self.rm.load_state({})
         self.assertFalse(ok)
+
+
+class TestSectorConcentration(unittest.TestCase):
+    """阶段 11 P1-2：行业集中度限制测试"""
+
+    def setUp(self):
+        # 启用行业限制
+        cfg = {
+            **TIGHT_CONFIG,
+            "portfolio_limits": {
+                **TIGHT_CONFIG["portfolio_limits"],
+                "max_sector_concentration": 0.40,
+                "max_industry_concentration": 0.25,
+            },
+        }
+        self.rm = RiskManager(cfg)
+        # mock _lookup_sector_industry，避免依赖真实 DB
+        from unittest.mock import patch
+        self._patcher = patch.object(
+            RiskManager, "_lookup_sector_industry",
+            side_effect=self._mock_lookup,
+        )
+        self._patcher.start()
+        # 确保不被熔断/财报等其他 reason 干扰
+        self.rm.clear_sector_cache()
+
+    def tearDown(self):
+        self._patcher.stop()
+
+    @staticmethod
+    def _mock_lookup(symbol):
+        """mock 4 只半导体 + 1 只医药"""
+        m = {
+            "MU.US": ("电子技术", "半导体"),
+            "TSM.US": ("电子技术", "半导体"),
+            "INTC.US": ("电子技术", "半导体"),
+            "MRVL.US": ("电子技术", "半导体"),
+            "JNJ.US": ("医药", "大型药物生产商"),
+        }
+        return m.get(symbol, (None, None))
+
+    def test_first_semi_buy_passes(self):
+        """第一只半导体买入（占 10%）应通过"""
+        result = self.rm.check_order(
+            _buy(symbol="MU.US", price=100.0),
+            {"total_assets": 100_000, "available_cash": 100_000},
+            {},  # 无现有持仓
+        )
+        self.assertTrue(result.passed, f"第一只半导体应通过，原因: {result.rejected_reasons}")
+
+    def test_industry_concentration_blocks(self):
+        """已持半导体 20%，再买半导体应被拒（25% 上限）"""
+        # 已持 TSM/INTC 各 10%，industry='半导体' 已占 20%
+        # 再买 MU 10% → 半导体合计 30% > 25% 上限 → 拒
+        existing = {
+            "TSM.US": {"market_value": 10_000, "quantity": 100},
+            "INTC.US": {"market_value": 10_000, "quantity": 100},
+        }
+        result = self.rm.check_order(
+            _buy(symbol="MU.US", price=100.0),
+            {"total_assets": 100_000, "available_cash": 80_000},
+            existing,
+        )
+        self.assertFalse(result.passed, "半导体已 20%，再加 10% 超 25% 应被拒")
+        self.assertTrue(any("Industry concentration" in r for r in result.rejected_reasons))
+
+    def test_sector_concentration_blocks(self):
+        """已持电子技术 35%，再买电子技术应被拒（40% 上限）"""
+        existing = {
+            "TSM.US": {"market_value": 10_000, "quantity": 100},
+            "INTC.US": {"market_value": 10_000, "quantity": 100},
+            "MRVL.US": {"market_value": 15_000, "quantity": 150},
+        }
+        result = self.rm.check_order(
+            _buy(symbol="MU.US", price=100.0),
+            {"total_assets": 100_000, "available_cash": 65_000},
+            existing,
+        )
+        # 电子技术已 35%，加 10% → 45% > 40% 上限
+        self.assertFalse(result.passed, "电子技术已 35%，再加 10% 超 40% 应被拒")
+
+    def test_different_sector_passes(self):
+        """虽然电子技术已 35%，但买医药应通过"""
+        existing = {
+            "TSM.US": {"market_value": 15_000, "quantity": 150},
+            "INTC.US": {"market_value": 20_000, "quantity": 200},
+        }
+        result = self.rm.check_order(
+            _buy(symbol="JNJ.US", price=100.0),
+            {"total_assets": 100_000, "available_cash": 65_000},
+            existing,
+        )
+        self.assertTrue(result.passed, f"医药与电子技术不同 sector 应通过，原因: {result.rejected_reasons}")
+
+    def test_no_lookup_data_skips_check(self):
+        """unknown symbol（mock 返回 None, None）应跳过 sector 检查不报错"""
+        result = self.rm.check_order(
+            _buy(symbol="UNKNOWN.US", price=100.0),
+            {"total_assets": 100_000, "available_cash": 100_000},
+            {},
+        )
+        # 不应因 sector 问题被拒（其他 reason 可能有，比如默认仓位 ok）
+        for r in result.rejected_reasons:
+            self.assertNotIn("Sector concentration", r)
+            self.assertNotIn("Industry concentration", r)
+
+    def test_disabled_when_config_zero(self):
+        """max_sector_concentration=0 应跳过该限制"""
+        cfg = {
+            **TIGHT_CONFIG,
+            "portfolio_limits": {
+                **TIGHT_CONFIG["portfolio_limits"],
+                "max_sector_concentration": 0,  # 禁用
+                "max_industry_concentration": 0,
+            },
+        }
+        rm = RiskManager(cfg)
+        # 即使大量同行业持仓也不应被 sector reason 拦
+        existing = {
+            "TSM.US": {"market_value": 50_000, "quantity": 500},
+        }
+        result = rm.check_order(
+            _buy(symbol="MU.US", price=100.0),
+            {"total_assets": 100_000, "available_cash": 50_000},
+            existing,
+        )
+        for r in result.rejected_reasons:
+            self.assertNotIn("Sector concentration", r)
+            self.assertNotIn("Industry concentration", r)
 
 
 class TestEarningsWindow(unittest.TestCase):

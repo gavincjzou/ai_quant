@@ -92,22 +92,23 @@ class RiskManager:
             self._daily_trade_count = 0
             self._daily_date = today
 
-        # 0. 熔断检查
-        if self._is_circuit_breaker:
-            return RiskCheckResult(
-                passed=False,
-                rejected_reasons=["Circuit breaker active: max drawdown exceeded"],
-            )
-
         # 只对买入信号做严格检查
         if signal.signal != Signal.BUY:
-            # 卖出直接放行（清仓/止损不应被风控拦截）
+            # 卖出直接放行（清仓/止损/熔断后清仓 都不应被风控拦截）
+            # 阶段 11 P1-7 修复：SELL 放行检查放在熔断检查之前
             qty = signal.quantity or current_positions.get(signal.symbol, {}).get("quantity", 0)
             return RiskCheckResult(
                 passed=True,
                 original_quantity=qty,
                 approved_quantity=qty,
                 approved_price=signal.price,
+            )
+
+        # 0. 熔断检查（仅拦截买入；SELL 已在上面放行）
+        if self._is_circuit_breaker:
+            return RiskCheckResult(
+                passed=False,
+                rejected_reasons=["Circuit breaker active: max drawdown exceeded"],
             )
 
         # 1. 单日交易次数限制
@@ -155,6 +156,28 @@ class RiskManager:
             reasons.append(
                 f"Position limit: {signal.symbol} at max ({max_single_pct:.0%} of assets)"
             )
+
+        # 4b. 阶段 11 P1-2 新增：行业集中度限制
+        # 防止 V1 Top-N 全是同行业（如半导体）时一次性买入导致单行业过度暴露
+        max_sector_pct = self._port_cfg.get("max_sector_concentration", 0)
+        max_industry_pct = self._port_cfg.get("max_industry_concentration", 0)
+        if (max_sector_pct > 0 or max_industry_pct > 0) and target_amount > 0:
+            sec, ind = self._lookup_sector_industry(signal.symbol)
+            if sec or ind:
+                # 算"加上 target_amount 后"该 sector/industry 的总暴露
+                sec_exposure_after, ind_exposure_after = self._compute_sector_exposure(
+                    signal.symbol, target_amount, current_positions, total_assets, sec, ind,
+                )
+                if max_sector_pct > 0 and sec and sec_exposure_after > max_sector_pct:
+                    reasons.append(
+                        f"Sector concentration: '{sec}' would be {sec_exposure_after:.1%} "
+                        f"after this trade > {max_sector_pct:.0%} limit"
+                    )
+                if max_industry_pct > 0 and ind and ind_exposure_after > max_industry_pct:
+                    reasons.append(
+                        f"Industry concentration: '{ind}' would be {ind_exposure_after:.1%} "
+                        f"after this trade > {max_industry_pct:.0%} limit"
+                    )
 
         # 5. 最小下单金额
         min_amount = self._pos_cfg.get("min_order_amount_usd", 50)
@@ -285,3 +308,86 @@ class RiskManager:
             if diff <= window:
                 return True
         return False
+
+    # ----------------------------------------------------------
+    # 阶段 11 P1-2：行业集中度限制 helpers
+    # ----------------------------------------------------------
+
+    # 类级缓存：避免每次 check_order 都查 DB
+    _sector_cache: Dict[str, tuple] = {}
+
+    def _lookup_sector_industry(self, symbol: str) -> tuple:
+        """查 symbol → (sector, industry)，从 fundamental_ratios 表读。
+
+        失败时返回 (None, None)。失败不报错（让 check 静默跳过该限制）。
+        懒加载 + 进程内缓存。
+        """
+        if symbol in self._sector_cache:
+            return self._sector_cache[symbol]
+
+        try:
+            # 延迟 import，避免 RiskManager 强依赖 DatabaseManager
+            from src.data.database import DatabaseManager
+            db = DatabaseManager()
+            with db._get_conn() as conn:
+                row = conn.execute(
+                    "SELECT sector, industry FROM fundamental_ratios WHERE symbol = ?",
+                    (symbol,),
+                ).fetchone()
+            if row:
+                result = (row[0], row[1])
+            else:
+                result = (None, None)
+        except Exception as e:
+            logger.debug(f"[RiskManager] _lookup_sector_industry({symbol}) 失败: {e}")
+            result = (None, None)
+
+        self._sector_cache[symbol] = result
+        return result
+
+    def _compute_sector_exposure(
+        self,
+        new_symbol: str,
+        new_amount: float,
+        current_positions: dict,
+        total_assets: float,
+        new_sector: str,
+        new_industry: str,
+    ) -> tuple:
+        """算"加上 new_amount 后" new_symbol 所属 sector / industry 的总暴露占比。
+
+        返回 (sector_pct, industry_pct)，0 表示无该维度数据。
+        """
+        if total_assets <= 0:
+            return (0.0, 0.0)
+
+        sector_value = new_amount  # 新建仓金额
+        industry_value = new_amount
+
+        for sym, pos in current_positions.items():
+            if sym == new_symbol:
+                continue  # 当前 symbol 的已有仓位通过 new_amount 路径已计入（target_amount 已扣 existing）
+            mv = float(pos.get("market_value", 0) or 0)
+            if mv <= 0:
+                continue
+            sec, ind = self._lookup_sector_industry(sym)
+            if new_sector and sec == new_sector:
+                sector_value += mv
+            if new_industry and ind == new_industry:
+                industry_value += mv
+
+        # 还要把 new_symbol 自己已有的持仓加回（避免双重计算同时漏算）
+        existing_self = float(
+            current_positions.get(new_symbol, {}).get("market_value", 0) or 0
+        )
+        sector_value += existing_self
+        industry_value += existing_self
+
+        sec_pct = sector_value / total_assets if new_sector else 0.0
+        ind_pct = industry_value / total_assets if new_industry else 0.0
+        return (sec_pct, ind_pct)
+
+    @classmethod
+    def clear_sector_cache(cls):
+        """清空 sector 缓存（测试 + sector 数据更新后调用）"""
+        cls._sector_cache.clear()
