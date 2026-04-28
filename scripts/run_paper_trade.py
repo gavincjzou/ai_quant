@@ -572,6 +572,21 @@ def main():
                         print(f"  ✅ 周度调仓报告已生成 + 推送")
                     else:
                         print(f"  ⚠️ 周度报告失败（不影响主流程）：{result.stderr[-200:]}")
+
+                    # 阶段 11 P1-4：周五数据时同时跑业绩归因
+                    print("\n📈 周五数据触发 → 跑业绩归因报告...")
+                    result2 = subprocess.run(
+                        [sys.executable,
+                         os.path.join(proj_root, "scripts", "attribution_report.py")],
+                        cwd=proj_root,
+                        capture_output=True,
+                        text=True,
+                        timeout=60,
+                    )
+                    if result2.returncode == 0:
+                        print(f"  ✅ 业绩归因报告已生成 + 推送")
+                    else:
+                        print(f"  ⚠️ 业绩归因失败（不影响主流程）：{result2.stderr[-200:]}")
                 else:
                     weekday_name = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"][
                         target_date_obj.weekday()

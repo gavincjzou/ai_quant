@@ -95,6 +95,15 @@ portfolio_limits:
   max_sector_concentration: 0.40       # 单 sector（如"电子技术"）最大占组合比例: 40%
   max_industry_concentration: 0.25     # 单 industry（如"半导体"）最大占组合比例: 25%
 
+# 阶段 11 P1-3 新增：大盘择时（SPY-200MA RegimeDetector）
+# 默认 disabled，需要积累一段时间数据 + 验证后再启用
+timing:
+  enabled: false                    # 总开关，默认关闭
+  ma_period: 200                    # 200 日均线
+  buffer_pct: 0.0                   # 缓冲带（0 = 严格分界，可设 0.01-0.03 减少抖动）
+  symbol: "SPY.US"                  # 大盘代理
+  bear_position_multiplier: 0.5     # bear regime 时单笔仓位倍率（0.5 = 减半）
+
 # ------------------------------------------------------------
 # Backtest Settings - 回测参数
 # ------------------------------------------------------------

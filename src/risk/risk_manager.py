@@ -49,6 +49,7 @@ class RiskManager:
         self._sl_cfg = config.get("stop_loss", {})
         self._daily_cfg = config.get("daily_limits", {})
         self._port_cfg = config.get("portfolio_limits", {})
+        self._timing_cfg = config.get("timing", {})  # 阶段 11 P1-3
 
         # 运行时状态
         self._daily_pnl: float = 0.0
@@ -59,6 +60,12 @@ class RiskManager:
 
         # 财报日历缓存 {symbol: [date, ...]}
         self._earnings_dates: Dict[str, List[date]] = {}
+
+        # 阶段 11 P1-3：RegimeDetector 懒加载
+        self._regime_detector = None
+        # 缓存当次 check_order 的 regime status（避免重复查 DB）
+        self._cached_regime_status = None
+        self._regime_cache_date = None
 
     # ----------------------------------------------------------
     # Core Check
@@ -178,6 +185,18 @@ class RiskManager:
                         f"Industry concentration: '{ind}' would be {ind_exposure_after:.1%} "
                         f"after this trade > {max_industry_pct:.0%} limit"
                     )
+
+        # 4c. 阶段 11 P1-3 新增：大盘择时（SPY-200MA RegimeDetector）
+        # bear regime 时单笔仓位 × multiplier（默认 0.5）
+        # 默认 disabled，需要在 risk.yaml.timing.enabled 启用
+        regime_multiplier = self._get_regime_multiplier(today)
+        if regime_multiplier < 1.0 and target_amount > 0:
+            old_target = target_amount
+            target_amount = target_amount * regime_multiplier
+            logger.info(
+                f"[Timing] {signal.symbol} bear regime → 仓位 ${old_target:.0f} → ${target_amount:.0f} "
+                f"(× {regime_multiplier:.2f})"
+            )
 
         # 5. 最小下单金额
         min_amount = self._pos_cfg.get("min_order_amount_usd", 50)
@@ -391,3 +410,51 @@ class RiskManager:
     def clear_sector_cache(cls):
         """清空 sector 缓存（测试 + sector 数据更新后调用）"""
         cls._sector_cache.clear()
+
+    # ----------------------------------------------------------
+    # 阶段 11 P1-3：大盘择时 helpers
+    # ----------------------------------------------------------
+
+    def _get_regime_multiplier(self, today: date) -> float:
+        """获取当前 regime 对应的仓位倍率（同一交易日内缓存）。
+
+        - timing 未启用 → 1.0
+        - bull/neutral → 1.0
+        - bear → bear_position_multiplier（默认 0.5）
+        - detect 异常 → 1.0（不影响主流程）
+        """
+        if not self._timing_cfg.get("enabled", False):
+            return 1.0
+
+        # 同一天内缓存（避免每个 BUY 都查 DB）
+        if self._regime_cache_date == today and self._cached_regime_status is not None:
+            status = self._cached_regime_status
+        else:
+            try:
+                if self._regime_detector is None:
+                    from src.strategy.regime_detector import RegimeDetector
+                    self._regime_detector = RegimeDetector(self._timing_cfg)
+                status = self._regime_detector.detect()
+                self._cached_regime_status = status
+                self._regime_cache_date = today
+            except Exception as e:
+                logger.warning(f"[Timing] regime detect 失败: {e}")
+                return 1.0
+
+        if status.is_bear:
+            return float(self._timing_cfg.get("bear_position_multiplier", 0.5))
+        return 1.0
+
+    def get_current_regime(self) -> Optional[dict]:
+        """暴露当前 regime 状态给 Dashboard 展示（不参与下单逻辑）。"""
+        if not self._timing_cfg.get("enabled", False):
+            return None
+        try:
+            if self._regime_detector is None:
+                from src.strategy.regime_detector import RegimeDetector
+                self._regime_detector = RegimeDetector(self._timing_cfg)
+            status = self._regime_detector.detect()
+            return status.to_dict()
+        except Exception as e:
+            logger.debug(f"[Timing] get_current_regime 失败: {e}")
+            return None

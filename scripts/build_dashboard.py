@@ -213,6 +213,9 @@ def collect_dashboard_data(project_root: str) -> Dict[str, Any]:
     # 9. 阶段 9 V1：多因子 Top-5（从 factor_snapshots 表读）
     data["factor_v1"] = load_factor_v1_top(db, top_n=5)
 
+    # 10. 阶段 11 P1-3：Market Regime
+    data["market_regime"] = load_market_regime()
+
     return data
 
 
@@ -810,6 +813,12 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     {factor_v1_table}
   </div>
 
+  <!-- ========== 2.6 阶段 11 P1-3：大盘择时 RegimeDetector ========== -->
+  <div class="card" style="margin-bottom: 22px;">
+    <h2>🌡 MARKET REGIME <span class="badge">{regime_badge}</span></h2>
+    {regime_html}
+  </div>
+
   <!-- ========== 3. 持仓概览（饼图 + 表格）========== -->
   <div class="grid grid-2" style="margin-bottom: 22px;">
     <div class="card">
@@ -1288,6 +1297,80 @@ def render_factor_v1_table(factor_data: Dict[str, Any], positions_symbols: set) 
     )
 
 
+def load_market_regime() -> dict:
+    """阶段 11 P1-3：加载当前大盘 regime 状态。
+
+    返回 {regime, spy_close, spy_ma, deviation_pct, as_of_date, enabled}
+    enabled=False 时仍计算并展示，但 multiplier=1.0
+    """
+    try:
+        from src.strategy.regime_detector import RegimeDetector
+        # Dashboard 总是计算并显示（不受 risk.yaml.timing.enabled 影响），方便观察
+        # 实际 RiskManager 的下单决策才看 enabled
+        detector = RegimeDetector({"enabled": True})
+        status = detector.detect()
+        d = status.to_dict()
+        # 额外加 enabled 标识（从 risk config 看真实是否启用）
+        try:
+            import yaml
+            with open("config/risk.yaml") as f:
+                rc = yaml.safe_load(f)
+            d["enabled"] = bool(rc.get("timing", {}).get("enabled", False))
+        except Exception:
+            d["enabled"] = False
+        return d
+    except Exception as e:
+        logger.warning(f"[Dashboard] load_market_regime 失败: {e}")
+        return {"regime": "unknown", "spy_close": 0, "spy_ma": 0,
+                "deviation_pct": 0, "enabled": False}
+
+
+def render_market_regime(regime_data: dict) -> str:
+    """渲染 Market Regime 卡片"""
+    regime = regime_data.get("regime", "unknown")
+    spy_close = regime_data.get("spy_close", 0)
+    spy_ma = regime_data.get("spy_ma", 0)
+    dev = regime_data.get("deviation_pct", 0)
+    as_of = regime_data.get("as_of_date", "—")
+    enabled = regime_data.get("enabled", False)
+
+    if regime == "unknown":
+        return "<p style='color: var(--color-text-muted); text-align: center; padding: 20px; font-family: monospace;'>// REGIME UNKNOWN</p>"
+
+    # 根据 regime 选颜色（注意：监管要求中国股市惯例红涨绿跌——bull=红，bear=绿；
+    # 但 Cyberpunk Dashboard 现有 .up=红/.down=绿 已遵循，复用即可）
+    if regime == "bull":
+        regime_class = "up"
+        regime_emoji = "🐂"
+        regime_label = "BULL"
+    elif regime == "bear":
+        regime_class = "down"
+        regime_emoji = "🐻"
+        regime_label = "BEAR"
+    else:
+        regime_class = "neutral"
+        regime_emoji = "⚪"
+        regime_label = "NEUTRAL"
+
+    enabled_label = "✅ 启用" if enabled else "⏸ 待启用"
+
+    return (
+        "<div style='display: grid; grid-template-columns: 1fr 1fr; gap: 20px;'>"
+        f"<div><strong>{regime_emoji} 当前状态</strong><br/>"
+        f"<span class='{regime_class}' style='font-size: 28px; font-family: Orbitron, monospace;'>"
+        f"{regime_label}</span></div>"
+        f"<div><strong>📊 SPY-200MA</strong><br/>"
+        f"<span style='font-family: JetBrains Mono, monospace;'>"
+        f"close ${spy_close:.2f} vs MA ${spy_ma:.2f} ({'↑' if dev>0 else '↓'} {abs(dev):.2%})"
+        f"</span></div>"
+        "</div>"
+        f"<p style='margin-top: 15px; color: var(--color-text-muted); font-size: 13px;'>"
+        f"📅 数据截至 {as_of} · 配置状态 {enabled_label} · "
+        f"bear 时单笔仓位 ×0.5（risk.yaml.timing.enabled）"
+        f"</p>"
+    )
+
+
 def render_trades_timeline(trades: list, limit: int = 50) -> str:
     if not trades:
         return "<p style='color: #999; text-align: center; padding: 20px;'>无交易记录</p>"
@@ -1368,6 +1451,13 @@ def render_html(data: Dict[str, Any]) -> str:
                else " ⚠️ 滞后")
             if data["factor_v1"].get("snapshot_date")
             else "NO DATA"
+        ),
+
+        # 阶段 11 P1-3: Market Regime
+        regime_html=render_market_regime(data.get("market_regime", {})),
+        regime_badge=(
+            f'{data.get("market_regime", {}).get("regime", "—").upper()}'
+            + (" · ✅" if data.get("market_regime", {}).get("enabled") else " · ⏸")
         ),
 
         # JS 数据注入
