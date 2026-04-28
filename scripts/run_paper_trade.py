@@ -542,6 +542,45 @@ def main():
         elif not has_processed:
             print("\n⏸️ 无 gap 处理，跳过 V1 因子（周末/无新数据时正常行为）")
 
+        # 阶段10 A3：周度调仓分析报告（仅周一触发，即处理周五数据时）
+        # target_date.weekday() == 4 表示处理的是周五数据，意味着这是周一/周二早上跑的
+        # 设计：每周 1 次推送，避免每天刷屏
+        if not args.dry_run and v1_ok:
+            try:
+                from datetime import date as _date
+                target_str = summary.get("target_date")
+                target_date_obj = None
+                if target_str:
+                    try:
+                        target_date_obj = _date.fromisoformat(target_str)
+                    except Exception:
+                        target_date_obj = None
+
+                # 周五 weekday() = 4
+                if target_date_obj and target_date_obj.weekday() == 4:
+                    print("\n📅 检测到处理周五数据 → 触发周度调仓分析...")
+                    result = subprocess.run(
+                        [sys.executable,
+                         os.path.join(proj_root, "scripts", "weekly_rotation_report.py"),
+                         "--date", target_str],
+                        cwd=proj_root,
+                        capture_output=True,
+                        text=True,
+                        timeout=180,
+                    )
+                    if result.returncode == 0:
+                        print(f"  ✅ 周度调仓报告已生成 + 推送")
+                    else:
+                        print(f"  ⚠️ 周度报告失败（不影响主流程）：{result.stderr[-200:]}")
+                else:
+                    weekday_name = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"][
+                        target_date_obj.weekday()
+                    ] if target_date_obj else "未知"
+                    print(f"\nℹ️ 本次处理 {weekday_name} 数据，跳过周报（仅周五数据触发）")
+            except Exception as e:
+                logger.warning(f"[DailyScan] 周度调仓报告失败（忽略）：{e}")
+                print(f"  ⚠️ 周报失败（不影响主流程）：{e}")
+
         # 阶段8 Fix：Daily Scan 完成后自动生成 Dashboard
         # 必须放在 V1 之后，以便 Dashboard 读到最新 V1 snapshot
         # 失败不影响主流程（只 log warning）
