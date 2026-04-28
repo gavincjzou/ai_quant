@@ -25,7 +25,7 @@ import argparse
 import os
 import sys
 from datetime import datetime, timedelta
-from typing import List, Tuple
+from typing import Dict, List, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -289,6 +289,314 @@ def render_report(
     logger.info(f"回测报告已生成: {output_path}")
 
 
+# ============================================================
+# vs_holdings 模式：双组对比（V1 Top-N vs 当前持仓）
+# ============================================================
+
+def load_current_holdings_portfolio(
+    db: DatabaseManager,
+) -> Tuple[List[str], Dict[str, float]]:
+    """读 trading_state.paper.positions，返回 (symbols, weights)。
+
+    weights 按 market_value 加权（不算 cash）。
+    返回：([symbols], {symbol: weight}) 其中 weights 之和 = 1.0。
+    """
+    from src.data.trading_state import TradingState
+
+    state = TradingState(db.db_path)
+    positions = state.get("paper.positions") or {}
+    if not positions:
+        return [], {}
+
+    market_values = {}
+    for sym, p in positions.items():
+        mv = float(p.get("market_value", 0) or 0)
+        if mv > 0:
+            market_values[sym] = mv
+
+    total = sum(market_values.values())
+    if total <= 0:
+        return [], {}
+
+    weights = {s: v / total for s, v in market_values.items()}
+    return list(market_values.keys()), weights
+
+
+def compute_jaccard_overlap(set_a: set, set_b: set) -> float:
+    """Jaccard 相似度 = |A ∩ B| / |A ∪ B|"""
+    if not set_a and not set_b:
+        return 0.0
+    return len(set_a & set_b) / len(set_a | set_b)
+
+
+def render_vs_holdings_report(
+    snapshot_date: str,
+    start_date: str,
+    end_date: str,
+    v1_symbols: List[dict],   # V1 Top-N 详细信息
+    holdings_symbols: List[str],
+    holdings_weights: Dict[str, float],
+    metrics_v1: dict,
+    metrics_hold: dict,
+    metrics_bench: dict,
+    output_path: str,
+    benchmark: str = "QQQ.US",
+):
+    """渲染双组对比 Markdown 报告"""
+    v1_syms_set = {s["symbol"] for s in v1_symbols}
+    hold_syms_set = set(holdings_symbols)
+
+    overlap = v1_syms_set & hold_syms_set
+    only_v1 = v1_syms_set - hold_syms_set
+    only_hold = hold_syms_set - v1_syms_set
+    jaccard = compute_jaccard_overlap(v1_syms_set, hold_syms_set)
+
+    v1_ret = metrics_v1.get("port_total_return", 0) * 100
+    hold_ret = metrics_hold.get("port_total_return", 0) * 100
+    bench_ret = (metrics_bench.get("port_total_return", 0) * 100
+                 if metrics_bench else 0.0)
+    excess_v1 = v1_ret - hold_ret
+
+    lines = []
+    lines.append(f"# 📊 V1 Top-{len(v1_symbols)} vs 当前持仓 模拟换仓回测")
+    lines.append("")
+    lines.append(f"> 快照日期：`{snapshot_date}` · 回看区间：`{start_date}` → `{end_date}`")
+    lines.append(f"> 模式：vs_holdings（仅分析，**不下任何单**）")
+    lines.append("")
+
+    # ==== 一、核心结论 ====
+    lines.append("## 🎯 核心结论")
+    lines.append("")
+    if excess_v1 > 1.0:
+        verdict = f"🏆 **V1 跑赢当前持仓 {excess_v1:+.2f}%**，值得考虑按 V1 Top 调仓"
+    elif excess_v1 < -1.0:
+        verdict = f"📉 **V1 跑输当前持仓 {excess_v1:+.2f}%**，当前持仓表现更好，不建议换仓"
+    else:
+        verdict = f"⚖️ **V1 与当前持仓基本持平**（差异 {excess_v1:+.2f}%），无明显换仓动机"
+    lines.append(f"- {verdict}")
+    lines.append(f"- 持仓重叠度（Jaccard）：**{jaccard:.0%}**（{len(overlap)} 只重叠 / {len(v1_syms_set | hold_syms_set)} 只总集）")
+    lines.append(f"- 基准 {benchmark} 同期：{bench_ret:+.2f}%")
+    lines.append("")
+
+    # ==== 二、双组指标对比 ====
+    lines.append("## 📈 双组指标对比")
+    lines.append("")
+    lines.append(f"| 指标 | V1 Top-{len(v1_symbols)} | 当前持仓 | 差异 |")
+    lines.append("|---|---:|---:|---:|")
+
+    def _fmt_pct(x): return f"{x*100:+.2f}%" if x is not None else "N/A"
+    def _fmt_num(x, p=2): return f"{x:.{p}f}" if x is not None else "N/A"
+    def _diff_pct(a, b): return f"{(a-b)*100:+.2f}%" if a is not None and b is not None else "—"
+
+    rows = [
+        ("累计收益", metrics_v1.get("port_total_return"), metrics_hold.get("port_total_return"), True),
+        ("年化波动", metrics_v1.get("port_vol"), metrics_hold.get("port_vol"), True),
+        ("Sharpe", metrics_v1.get("sharpe"), metrics_hold.get("sharpe"), False),
+        ("最大回撤", metrics_v1.get("max_drawdown"), metrics_hold.get("max_drawdown"), True),
+        ("Beta", metrics_v1.get("beta"), metrics_hold.get("beta"), False),
+        ("Alpha", metrics_v1.get("alpha"), metrics_hold.get("alpha"), True),
+        ("胜率", metrics_v1.get("win_rate"), metrics_hold.get("win_rate"), True),
+    ]
+    for name, va, vb, is_pct in rows:
+        if is_pct:
+            lines.append(f"| {name} | {_fmt_pct(va)} | {_fmt_pct(vb)} | {_diff_pct(va, vb)} |")
+        else:
+            d = (va - vb) if (va is not None and vb is not None) else None
+            d_str = f"{d:+.2f}" if d is not None else "—"
+            lines.append(f"| {name} | {_fmt_num(va)} | {_fmt_num(vb)} | {d_str} |")
+    lines.append("")
+
+    # ==== 三、持仓差异分析 ====
+    lines.append("## 🔄 持仓差异分析")
+    lines.append("")
+    lines.append("### V1 推荐但当前未持有")
+    if only_v1:
+        v1_info = {s["symbol"]: s for s in v1_symbols}
+        for sym in sorted(only_v1, key=lambda s: v1_info[s]["rank"]):
+            info = v1_info[sym]
+            lines.append(f"- **{sym}** · V1 排名 #{info['rank']} · "
+                         f"score {info['total_score']:.2f} · "
+                         f"{info.get('industry') or info.get('sector') or '?'}")
+    else:
+        lines.append("_无_")
+    lines.append("")
+
+    lines.append("### 当前持有但不在 V1 Top-N")
+    if only_hold:
+        for sym in sorted(only_hold):
+            w = holdings_weights.get(sym, 0)
+            lines.append(f"- **{sym}** · 当前权重 {w:.0%}")
+    else:
+        lines.append("_无_")
+    lines.append("")
+
+    lines.append("### 双方都有")
+    if overlap:
+        for sym in sorted(overlap):
+            w = holdings_weights.get(sym, 0)
+            lines.append(f"- **{sym}** · 持仓权重 {w:.0%}")
+    else:
+        lines.append("_无_")
+    lines.append("")
+
+    # ==== 四、调仓建议（仅展示，不下单）====
+    lines.append("## 💡 调仓建议（仅参考，不会自动执行）")
+    lines.append("")
+    if jaccard >= 0.8:
+        lines.append("> ✅ 重叠度高，**保持现有持仓即可**")
+    elif excess_v1 > 2.0:
+        lines.append(f"> 🟡 V1 显著占优（+{excess_v1:.2f}%），可考虑：")
+        lines.append("> - 减仓"
+                     f"：{', '.join(sorted(only_hold)) if only_hold else '无'}")
+        lines.append("> - 加仓"
+                     f"：{', '.join(sorted(only_v1)) if only_v1 else '无'}")
+    elif excess_v1 < -2.0:
+        lines.append(f"> 🔴 V1 显著跑输（{excess_v1:.2f}%），**不建议按 V1 调仓**")
+    else:
+        lines.append("> ⚖️ 差异不显著，**继续观察**，等数据更明确再决策")
+    lines.append("")
+
+    # ==== 五、当前持仓明细 ====
+    lines.append("## 📦 当前持仓权重明细")
+    lines.append("")
+    lines.append("| 标的 | 权重 |")
+    lines.append("|---|---:|")
+    for sym, w in sorted(holdings_weights.items(), key=lambda x: -x[1]):
+        lines.append(f"| {sym} | {w:.0%} |")
+    lines.append("")
+
+    # ==== 六、V1 Top-N 名单 ====
+    lines.append(f"## 🎯 V1 Top-{len(v1_symbols)} 名单")
+    lines.append("")
+    lines.append("| Rank | 标的 | 总分 | 行业 |")
+    lines.append("|---:|---|---:|---|")
+    for s in v1_symbols:
+        ind = s.get("industry") or s.get("sector") or "—"
+        lines.append(f"| #{s['rank']} | **{s['symbol']}** | {s['total_score']:.2f} | {ind} |")
+    lines.append("")
+
+    lines.append("---")
+    lines.append(
+        f"_由 `scripts/backtest_factor_screen.py --mode vs_holdings` 生成 · "
+        f"{datetime.now().strftime('%Y-%m-%d %H:%M')}_"
+    )
+
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+    logger.info(f"vs_holdings 报告已生成: {output_path}")
+
+
+def run_vs_holdings_mode(args):
+    """vs_holdings 模式：V1 Top-N vs 当前持仓双组对比"""
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    snapshot_date = args.date or datetime.now().strftime("%Y-%m-%d")
+
+    end_dt = datetime.strptime(snapshot_date, "%Y-%m-%d")
+    start_dt = end_dt - timedelta(days=int(args.days * 1.5))
+    start_date = start_dt.strftime("%Y-%m-%d")
+    end_date = end_dt.strftime("%Y-%m-%d")
+
+    logger.info(
+        f"=== vs_holdings 模式 | V1 Top-{args.top} vs 当前持仓 | "
+        f"快照 {snapshot_date} | 区间 {start_date} → {end_date} ==="
+    )
+
+    db = DatabaseManager(os.path.join(project_root, "data_cache", "quant.db"))
+
+    # 1. 读 V1 Top-N
+    v1_symbols = load_topn_symbols(db, "v1", snapshot_date, args.top)
+    if not v1_symbols:
+        logger.error(f"读不到 v1 @ {snapshot_date} 的 Top-{args.top}")
+        logger.error("提示：先跑 `python scripts/run_factor_screen.py --version v1`")
+        return 1
+    v1_syms_list = [s["symbol"] for s in v1_symbols]
+    logger.info(f"V1 Top-{args.top}: {v1_syms_list}")
+
+    # 2. 读当前持仓
+    hold_syms, hold_weights = load_current_holdings_portfolio(db)
+    if not hold_syms:
+        logger.error("当前无持仓数据，无法对比")
+        return 1
+    logger.info(f"当前持仓 {len(hold_syms)} 只：{hold_syms}")
+
+    # 3. 双组组合收益（V1 等权 + 持仓按市值权重）
+    v1_ret, _ = compute_portfolio_returns(db, v1_syms_list, start_date, end_date)
+    hold_ret_series = _compute_weighted_portfolio_returns(
+        db, hold_syms, hold_weights, start_date, end_date
+    )
+
+    if v1_ret.empty or hold_ret_series.empty:
+        logger.error("组合收益为空（可能 K 线缺失）")
+        return 1
+
+    # 4. 基准
+    bench_df = load_kline_for_period(db, args.benchmark, start_date, end_date)
+    bench_ret = compute_returns(bench_df["close"]) if not bench_df.empty else pd.Series(dtype="float64")
+    if not bench_df.empty:
+        bench_ret.index = bench_df["date"]
+
+    # 5. 计算指标（V1 vs Bench / Holdings vs Bench）
+    metrics_v1 = compute_metrics(v1_ret, bench_ret) if not bench_ret.empty else {}
+    metrics_hold = compute_metrics(hold_ret_series, bench_ret) if not bench_ret.empty else {}
+    # 基准指标（自己 vs 自己 = 0 alpha 1 beta）
+    metrics_bench = compute_metrics(bench_ret, bench_ret) if not bench_ret.empty else {}
+
+    # 6. 渲染报告
+    output_dir = os.path.join(project_root, "output")
+    os.makedirs(output_dir, exist_ok=True)
+    output_path = os.path.join(
+        output_dir, f"vs_holdings_{snapshot_date}.md"
+    )
+    render_vs_holdings_report(
+        snapshot_date, start_date, end_date,
+        v1_symbols, hold_syms, hold_weights,
+        metrics_v1, metrics_hold, metrics_bench,
+        output_path, args.benchmark,
+    )
+
+    # 7. 终端摘要
+    v1_total = metrics_v1.get("port_total_return", 0) * 100
+    hold_total = metrics_hold.get("port_total_return", 0) * 100
+    excess = v1_total - hold_total
+    print("\n" + "=" * 72)
+    print(f"vs_holdings 回测总结 | {snapshot_date}")
+    print("=" * 72)
+    print(f"  V1 Top-{args.top} 累计收益:   {v1_total:+.2f}%")
+    print(f"  当前持仓累计收益:        {hold_total:+.2f}%")
+    print(f"  V1 - 持仓:              {excess:+.2f}%")
+    print(f"  持仓重叠度:              {compute_jaccard_overlap(set(v1_syms_list), set(hold_syms)):.0%}")
+    print(f"  报告路径:                {output_path}")
+    print("=" * 72)
+    return 0
+
+
+def _compute_weighted_portfolio_returns(
+    db: DatabaseManager,
+    symbols: List[str],
+    weights: Dict[str, float],
+    start: str,
+    end: str,
+) -> pd.Series:
+    """按权重计算组合日收益（不像 compute_portfolio_returns 是等权）"""
+    individual = {}
+    for sym in symbols:
+        df = load_kline_for_period(db, sym, start, end)
+        if df.empty:
+            logger.warning(f"[Backtest] {sym} K 线为空")
+            continue
+        ret = compute_returns(df["close"])
+        ret.index = df["date"]
+        individual[sym] = ret
+
+    if not individual:
+        return pd.Series(dtype="float64")
+
+    all_df = pd.DataFrame(individual).fillna(0.0)
+    # 加权（缺数据的标的权重不剔除，影响很小，简化处理）
+    weighted = sum(all_df[s] * weights.get(s, 0) for s in all_df.columns)
+    return weighted
+
+
 def main():
     parser = argparse.ArgumentParser(description="阶段 9 V1 多因子回看回测")
     parser.add_argument("--version", choices=["v0", "v1"], default="v1",
@@ -297,7 +605,19 @@ def main():
     parser.add_argument("--top", type=int, default=10, help="Top-N，默认 10")
     parser.add_argument("--days", type=int, default=30, help="回看天数（交易日），默认 30")
     parser.add_argument("--benchmark", type=str, default="QQQ.US", help="基准")
+    parser.add_argument(
+        "--mode", choices=["standalone", "vs_holdings"], default="standalone",
+        help="standalone=单组回测（默认）；vs_holdings=V1 Top-N vs 当前持仓双组对比",
+    )
     args = parser.parse_args()
+
+    if args.mode == "vs_holdings":
+        return run_vs_holdings_mode(args)
+    return run_standalone_mode(args)
+
+
+def run_standalone_mode(args):
+    """原有单组回测（保持向后兼容）"""
 
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     snapshot_date = args.date or datetime.now().strftime("%Y-%m-%d")
