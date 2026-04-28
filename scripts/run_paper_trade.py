@@ -587,6 +587,22 @@ def main():
                         print(f"  ✅ 业绩归因报告已生成 + 推送")
                     else:
                         print(f"  ⚠️ 业绩归因失败（不影响主流程）：{result2.stderr[-200:]}")
+
+                    # 阶段 11 P1-5：周五数据时同时跑 Forward Backtest
+                    print("\n🔬 周五数据触发 → 跑 Forward Backtest...")
+                    result3 = subprocess.run(
+                        [sys.executable,
+                         os.path.join(proj_root, "scripts", "forward_backtest_factor.py"),
+                         "--version", "v1", "--top", "5", "--days", "30"],
+                        cwd=proj_root,
+                        capture_output=True,
+                        text=True,
+                        timeout=300,  # forward 涉及多个 snapshot × 多标的 K 线
+                    )
+                    if result3.returncode == 0:
+                        print(f"  ✅ Forward Backtest 报告已生成 + 推送")
+                    else:
+                        print(f"  ⚠️ Forward Backtest 失败（不影响主流程）：{result3.stderr[-200:]}")
                 else:
                     weekday_name = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"][
                         target_date_obj.weekday()
