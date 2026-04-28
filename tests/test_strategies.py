@@ -90,16 +90,28 @@ class TestMACrossStrategy(unittest.TestCase):
         self.assertIsNone(signal)
 
     def test_uptrend_signal(self):
-        """上升趋势数据应在某个时点产生BUY信号"""
-        data = _generate_uptrend_data(60)
+        """先横盘后上升的数据应在某个时点产生 BUY 信号（金叉）"""
+        # 用确定性数据：前 25 根横盘，后 35 根强势上升 → 必然金叉
+        np.random.seed(42)
+        n = 60
+        dates = pd.date_range("2024-01-01", periods=n, freq="B")
+        close_flat = 100 + np.random.randn(25) * 0.3  # 前 25 根横盘
+        close_up = 100 + np.arange(35) * 1.5 + np.random.randn(35) * 0.3  # 后 35 根上升
+        close = np.concatenate([close_flat, close_up])
+        data = pd.DataFrame({
+            "date": dates,
+            "open": close - 0.2, "high": close + 0.5, "low": close - 0.5,
+            "close": close,
+            "volume": np.random.randint(1000000, 5000000, n),
+        })
+
         has_buy = False
         for i in range(25, len(data)):
             signal = self.strategy.generate_signal("AAPL.US", data.iloc[:i+1])
             if signal and signal.signal == Signal.BUY:
                 has_buy = True
                 break
-        # 上升趋势中应至少产生一次买入信号
-        self.assertTrue(has_buy, "Expected at least one BUY signal in uptrend")
+        self.assertTrue(has_buy, "Expected at least one BUY signal in uptrend after consolidation")
 
 
 class TestRSIStrategy(unittest.TestCase):
