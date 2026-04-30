@@ -23,7 +23,7 @@ import argparse
 import os
 import sys
 from datetime import date, datetime, timedelta
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -275,6 +275,343 @@ class PaperTradingOrchestrator:
         return result
 
     # ============================================================
+    # 阶段11 P1-1（dev-13）：数据陈旧度告警
+    # ============================================================
+
+    def _check_data_staleness(self) -> dict:
+        """
+        检测三类数据的陈旧度，触发企微告警避免再次"卡住没人知道"。
+
+        检查项：
+        1. daily_performance：最近 N 条 market_value 是否完全相同（精度 $1）
+        2. kline_data：持仓最新 K 线日期距今天 > 阈值
+        3. factor_snapshots：V1 最新 snapshot 距今天 > 阈值
+
+        告警阈值（从 risk_cfg 读，默认值见下）：
+        - perf_stale_days = 3（连续 3 天 market_value 不变即告警）
+        - kline_stale_days = 3
+        - factor_stale_days = 5（V1 周末不跑，留点冗余）
+        """
+        from datetime import date, datetime as _dt
+
+        cfg = self.risk_cfg.get("staleness_check", {}) if self.risk_cfg else {}
+        perf_stale_days = int(cfg.get("perf_stale_days", 3))
+        kline_stale_days = int(cfg.get("kline_stale_days", 3))
+        factor_stale_days = int(cfg.get("factor_stale_days", 5))
+
+        issues = []
+        details = {}
+
+        # ---- 1. daily_performance market_value 是否卡住 ----
+        try:
+            with self.db._get_conn() as conn:
+                rows = conn.execute(
+                    "SELECT date, market_value FROM daily_performance "
+                    "WHERE trade_mode='paper' ORDER BY date DESC LIMIT ?",
+                    (perf_stale_days,),
+                ).fetchall()
+            if len(rows) >= perf_stale_days:
+                mvs = [float(r[1]) for r in rows]
+                # 全部差异 < $1 视为"完全相同"
+                spread = max(mvs) - min(mvs)
+                details["perf"] = {
+                    "rows_checked": len(rows),
+                    "spread": spread,
+                    "latest_dates": [r[0] for r in rows],
+                }
+                if spread < 1.0:
+                    issues.append(
+                        f"daily_performance 最近 {perf_stale_days} 天 market_value "
+                        f"完全相同（spread < \\$1，可能 current_price 未刷新）"
+                    )
+        except Exception as e:
+            logger.warning(f"[Staleness] daily_perf 检查失败：{e}")
+
+        # ---- 2. kline_data 持仓最新 K 线日期 ----
+        try:
+            positions = list(self.trader.positions.keys())
+            today = date.today()
+            if positions:
+                placeholders = ",".join(["?"] * len(positions))
+                with self.db._get_conn() as conn:
+                    rows = conn.execute(
+                        f"SELECT symbol, MAX(date) FROM kline_data "
+                        f"WHERE symbol IN ({placeholders}) GROUP BY symbol",
+                        positions,
+                    ).fetchall()
+                stale_symbols = []
+                kline_dates = {}
+                for sym, max_date in rows:
+                    if not max_date:
+                        continue
+                    # max_date 形如 '2026-04-29 12:00:00' 或 '2026-04-29'
+                    d_str = max_date[:10]
+                    try:
+                        d_obj = _dt.strptime(d_str, "%Y-%m-%d").date()
+                        delta = (today - d_obj).days
+                        kline_dates[sym] = {"date": d_str, "days_old": delta}
+                        if delta > kline_stale_days:
+                            stale_symbols.append(f"{sym}({delta}d)")
+                    except Exception:
+                        pass
+                details["kline"] = kline_dates
+                if stale_symbols:
+                    issues.append(
+                        f"kline_data 持仓 K 线陈旧（> {kline_stale_days} 天）："
+                        f"{', '.join(stale_symbols)}"
+                    )
+        except Exception as e:
+            logger.warning(f"[Staleness] kline_data 检查失败：{e}")
+
+        # ---- 3. factor_snapshots V1 最新日期 ----
+        try:
+            today = date.today()
+            with self.db._get_conn() as conn:
+                row = conn.execute(
+                    "SELECT MAX(date) FROM factor_snapshots WHERE version='v1'"
+                ).fetchone()
+            v1_latest = row[0] if row else None
+            if v1_latest:
+                d_obj = _dt.strptime(v1_latest[:10], "%Y-%m-%d").date()
+                delta = (today - d_obj).days
+                details["factor_v1"] = {"date": v1_latest, "days_old": delta}
+                if delta > factor_stale_days:
+                    issues.append(
+                        f"factor_snapshots V1 最新 {v1_latest}，已陈旧 {delta} 天"
+                        f"（> {factor_stale_days} 天阈值）"
+                    )
+            else:
+                issues.append("factor_snapshots V1 完全无数据")
+                details["factor_v1"] = {"date": None, "days_old": None}
+        except Exception as e:
+            logger.warning(f"[Staleness] factor_snapshots 检查失败：{e}")
+
+        # ---- 触发告警 ----
+        if issues:
+            logger.warning(f"[Staleness] ⚠️ 检测到 {len(issues)} 项陈旧问题")
+            try:
+                body_lines = [
+                    f"**时间**：{_dt.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                    f"**陈旧项**：{len(issues)}",
+                    "",
+                ]
+                for i, msg in enumerate(issues, 1):
+                    body_lines.append(f"{i}. {msg}")
+                body_lines.append("")
+                body_lines.append("**可能原因**：")
+                body_lines.append("- LongPort API 间歇性失败")
+                body_lines.append("- daily-scan 没真正跑（launchd 可能挂了）")
+                body_lines.append("- _refresh_position_prices 报错被静默")
+                body_lines.append("")
+                body_lines.append("**排查命令**：`./run_daily.sh` 或查 `~/ai_quant/logs/launchd.out.log`")
+                body_text = "\n".join(body_lines)
+                self.alerter.warning(
+                    body_text,
+                    title="⚠️ 数据陈旧度告警",
+                    tags=["daily_scan", "staleness"],
+                    markdown=body_text,
+                )
+            except Exception as e:
+                logger.warning(f"[Staleness] 告警发送失败：{e}")
+        else:
+            logger.info("[Staleness] ✅ 数据新鲜度正常")
+
+        return {"issues": issues, "details": details}
+
+    # ============================================================
+    # 阶段11 P1-3（dev-13）：手动补跑历史 daily_perf
+    # ============================================================
+
+    def replay_dates(
+        self,
+        from_date: str,
+        to_date: Optional[str] = None,
+        dry_run: bool = True,
+    ) -> dict:
+        """
+        手动补跑某段历史日期的 daily_performance。
+
+        典型使用场景：
+        - 本周 daily-scan 跑了但持仓 current_price 没刷新，
+          导致 daily_perf 多天数据相同。修了 P0-1 后用这个方法补跑历史。
+
+        实现策略：
+        - 一次拉每只持仓 30 根历史 K 线（覆盖 from_date 到 to_date）
+        - 对每个目标日期 d：从 K 线里按 date 找该日 close → update_prices →
+          take_daily_snapshot（INSERT OR REPLACE，覆盖旧值）
+        - dry_run=True 时只显示 diff 不写库
+
+        Args:
+            from_date: 起始日期 YYYY-MM-DD
+            to_date: 结束日期 YYYY-MM-DD（默认今天）
+            dry_run: True=只显示 diff 不写库
+
+        Returns:
+            {"processed": [...], "skipped": [...], "errors": [...]}
+        """
+        from datetime import date as _date, datetime as _dt
+
+        result = {"processed": [], "skipped": [], "errors": [], "dry_run": dry_run}
+
+        try:
+            d_from = _dt.strptime(from_date, "%Y-%m-%d").date()
+        except Exception:
+            raise ValueError(f"from_date 格式错误（应为 YYYY-MM-DD）：{from_date}")
+
+        if to_date:
+            try:
+                d_to = _dt.strptime(to_date, "%Y-%m-%d").date()
+            except Exception:
+                raise ValueError(f"to_date 格式错误：{to_date}")
+        else:
+            d_to = _date.today()
+
+        if d_to < d_from:
+            raise ValueError(f"to_date ({d_to}) 不能早于 from_date ({d_from})")
+
+        positions = list(self.trader.positions.keys())
+        if not positions:
+            logger.warning("[Replay] 当前无持仓，无法补跑")
+            return result
+
+        # 计算 span：from 到 to 之间最多 N 天，再 + 5 缓冲
+        span_days = (d_to - d_from).days + 1
+        kline_count = max(span_days + 10, 30)
+
+        logger.info(
+            f"[Replay] {'[DRY RUN] ' if dry_run else ''}"
+            f"补跑 {d_from} ~ {d_to}（{span_days} 天），持仓 {len(positions)} 只，"
+            f"拉 {kline_count} 根 K 线"
+        )
+
+        # 1. 一次拉所有持仓的 K 线
+        try:
+            fetched = self.fetcher.fetch_history(
+                symbols=positions,
+                period="1d",
+                count=kline_count,
+                save_to_db=not dry_run,  # dry_run 时不写 kline_data
+            )
+        except Exception as e:
+            logger.exception(f"[Replay] 批量拉 K 线失败：{e}")
+            result["errors"].append({"phase": "fetch_history", "error": str(e)})
+            return result
+
+        # 2. 构造 {symbol: {date_str: close}} 的字典加速查表
+        kline_index = {}
+        for sym, df in fetched.items():
+            if df is None or df.empty:
+                continue
+            kline_index[sym] = {}
+            for _, row in df.iterrows():
+                d_str = str(row["date"])[:10]
+                try:
+                    kline_index[sym][d_str] = float(row["close"])
+                except Exception:
+                    pass
+
+        # 3. 取所有 trading days（用 calendar 排除周末/假日）
+        trading_days = []
+        cur = d_from
+        while cur <= d_to:
+            if self.calendar.is_trading_day(cur):
+                trading_days.append(cur)
+            cur += timedelta(days=1)
+
+        logger.info(f"[Replay] {len(trading_days)} 个交易日待补跑")
+
+        # 4. 逐日 replay
+        for d in trading_days:
+            d_str = d.isoformat()
+            try:
+                # 构造该日价格字典
+                prices = {}
+                missing = []
+                for sym in positions:
+                    klines = kline_index.get(sym, {})
+                    close = klines.get(d_str)
+                    if close is not None and close > 0:
+                        prices[sym] = close
+                    else:
+                        # 该日没有 K 线（可能是节假日，或该 symbol 当天停牌）
+                        # 退化策略：用最近一个交易日的 close
+                        sorted_dates = sorted([k for k in klines.keys() if k <= d_str])
+                        if sorted_dates:
+                            prices[sym] = klines[sorted_dates[-1]]
+                            missing.append(f"{sym}(用 {sorted_dates[-1]})")
+                        else:
+                            missing.append(f"{sym}(无可用)")
+
+                if not prices:
+                    result["skipped"].append({"date": d_str, "reason": "no_prices"})
+                    logger.warning(f"[Replay] {d_str} 无可用价格，跳过")
+                    continue
+
+                # 查 daily_perf 旧值
+                with self.db._get_conn() as conn:
+                    old = conn.execute(
+                        "SELECT total_assets, market_value, daily_pnl FROM daily_performance "
+                        "WHERE trade_mode='paper' AND date=?",
+                        (d_str,),
+                    ).fetchone()
+
+                # 模拟 update_prices + 计算新市值（不直接调 update_prices 避免污染当前内存）
+                new_market_value = sum(
+                    prices.get(sym, 0) * self.trader.positions[sym]["quantity"]
+                    for sym in positions
+                )
+                new_total = self.trader.cash + new_market_value
+
+                old_total = float(old[0]) if old else None
+                old_mv = float(old[1]) if old else None
+                diff = (new_total - old_total) if old_total is not None else None
+
+                entry = {
+                    "date": d_str,
+                    "old_total": old_total,
+                    "new_total": new_total,
+                    "old_mv": old_mv,
+                    "new_mv": new_market_value,
+                    "diff": diff,
+                    "missing": missing,
+                }
+
+                if dry_run:
+                    logger.info(
+                        f"[Replay-DRY] {d_str}: total {old_total} → {new_total:.2f} "
+                        f"(diff {diff:+.2f}) mv {old_mv} → {new_market_value:.2f}"
+                        + (f" [缺数: {missing}]" if missing else "")
+                    )
+                else:
+                    # 真补：刷价 → take_daily_snapshot（INSERT OR REPLACE）
+                    self.trader.update_prices(prices)
+                    self.trader.take_daily_snapshot(scan_date=d_str)
+                    logger.info(
+                        f"[Replay] ✅ {d_str}: total {old_total} → {new_total:.2f} "
+                        f"(diff {diff:+.2f})"
+                    )
+
+                result["processed"].append(entry)
+
+            except Exception as e:
+                logger.exception(f"[Replay] {d_str} 失败：{e}")
+                result["errors"].append({"date": d_str, "error": str(e)})
+
+        # 5. 真补完后，把 trader 状态持久化（避免后续 daily-scan 用到旧内存）
+        if not dry_run and result["processed"]:
+            try:
+                self.trader.save_state()
+                logger.info("[Replay] ✅ trader 状态已持久化")
+            except Exception as e:
+                logger.warning(f"[Replay] save_state 失败（忽略）：{e}")
+
+        logger.info(
+            f"[Replay] 完成：{len(result['processed'])} 处理 / "
+            f"{len(result['skipped'])} 跳过 / {len(result['errors'])} 失败"
+        )
+        return result
+
+    # ============================================================
     # 阶段7 新增：日线扫描模式（方案 C）
     # ============================================================
 
@@ -384,6 +721,14 @@ class PaperTradingOrchestrator:
 
         logger.info(f"[DailyScan] ✅ 完成，处理 {len(summary['processed'])} 天")
         self._send_daily_scan_summary(summary, dry_run=False)
+
+        # 阶段11 P1-1（dev-13）：数据陈旧度检查（只读，独立于主流程）
+        # 这是为了避免再次出现"market_value 8 天不变没人发现"的悲剧
+        try:
+            self._check_data_staleness()
+        except Exception as e:
+            logger.warning(f"[DailyScan] 陈旧度检查失败（忽略）：{e}")
+
         return summary
 
     def _send_daily_scan_summary(self, summary: dict, dry_run: bool = False):
@@ -535,6 +880,11 @@ def main():
                         help="--daily-scan 最多回补的交易日数（默认 14）")
     parser.add_argument("--source", type=str, default="longport",
                         choices=["longport", "yfinance"])
+    # 阶段11 P1-3（dev-13）：手动补跑历史 daily_perf
+    parser.add_argument("--replay-date", type=str, default=None,
+                        help="补跑历史 daily_perf 起始日 YYYY-MM-DD（与 --replay-to 配合使用）")
+    parser.add_argument("--replay-to", type=str, default=None,
+                        help="补跑结束日 YYYY-MM-DD（默认今天，与 --replay-date 配合）")
     args = parser.parse_args()
 
     # 配置日志
@@ -547,6 +897,38 @@ def main():
     orch = PaperTradingOrchestrator(
         capital=args.capital, history_source=args.source
     )
+
+    # ===== 阶段11 P1-3（dev-13）：补跑历史模式（独立入口，与 daily-scan 互斥）=====
+    if args.replay_date:
+        print(f"\n🔁 Replay 模式启动 | 范围: {args.replay_date} ~ "
+              f"{args.replay_to or '今天'}")
+        print(f"   --dry-run={'是' if args.dry_run else '否（会写库）'}")
+        print("-" * 80)
+        try:
+            replay_result = orch.replay_dates(
+                from_date=args.replay_date,
+                to_date=args.replay_to,
+                dry_run=args.dry_run,
+            )
+        except ValueError as e:
+            print(f"❌ 参数错误：{e}")
+            sys.exit(1)
+
+        print(f"\n✅ Replay 完成 | "
+              f"处理 {len(replay_result['processed'])} 天 / "
+              f"跳过 {len(replay_result['skipped'])} 天 / "
+              f"失败 {len(replay_result['errors'])} 天")
+        if replay_result['processed']:
+            print("\n变化明细（前 10 条）：")
+            print(f"{'日期':<12}{'旧 total':>12}{'新 total':>12}{'差额':>10}")
+            for entry in replay_result['processed'][:10]:
+                old_t = f"{entry['old_total']:.2f}" if entry['old_total'] else "无"
+                new_t = f"{entry['new_total']:.2f}"
+                diff = f"{entry['diff']:+.2f}" if entry['diff'] else "新增"
+                print(f"{entry['date']:<12}{old_t:>12}{new_t:>12}{diff:>10}")
+        if args.dry_run:
+            print("\n⚠️ 这是 dry-run，未写入数据库。确认无误后去掉 --dry-run 真正补跑。")
+        sys.exit(0)
 
     # ===== 阶段7 新增：日线扫描模式（独立入口，不走 scheduler） =====
     if args.daily_scan:
@@ -574,6 +956,7 @@ def main():
         proj_root = orch.project_root
 
         v1_ok = False
+        v1_can_run_downstream = False
         has_processed = bool(summary.get("processed"))
 
         if not args.dry_run and has_processed:
@@ -616,16 +999,36 @@ def main():
                         "**影响**：周报 / 业绩归因 / Forward Backtest 本次跳过",
                         "**建议**：手动 `./run_daily.sh` 重跑，或检查 LongPort SDK 状态",
                     ]
-                    orch.alerter.send(
-                        level="warning",
+                    body_text = "\n".join(body_lines)
+                    orch.alerter.warning(
+                        body_text,
                         title=title,
-                        body="\n".join(body_lines),
                         tags=["daily_scan", "v1_factor_fail"],
+                        markdown=body_text,
                     )
                 except Exception as ae:
                     logger.warning(f"[DailyScan] V1 失败告警发送失败（忽略）：{ae}")
 
+            # 阶段11 P1-2（dev-13）：V1 失败时若 DB 有历史 snapshot，仍允许下游周报跑
+            # weekly_rotation_report 自带 fallback：找最新可用 V1 日期
+            # 这样避免"V1 失败 8 天 → 下游全部停摆"的连锁失败
+            # 注：此处不写 fallback 假数据，只允许下游用最新历史 snapshot
+            v1_can_run_downstream = v1_ok
+            if not v1_ok:
+                try:
+                    with orch.db._get_conn() as conn:
+                        latest = conn.execute(
+                            "SELECT MAX(date) FROM factor_snapshots WHERE version='v1'"
+                        ).fetchone()[0]
+                    if latest:
+                        v1_can_run_downstream = True
+                        print(f"  ℹ️ V1 失败但有历史 snapshot ({latest}) → 允许下游周报用 fallback")
+                except Exception as e:
+                    logger.warning(f"[DailyScan] 检查 V1 历史 snapshot 失败：{e}")
+
             # V1 成功 → 推送排名变化（阶段9 V1 集成 Phase C）
+            # 注：FactorNotifier 推"今天 vs 昨天"排名变化，V1 失败时今天没新数据，无法推
+            #     所以这里仍用 v1_ok（不能用 fallback）
             if v1_ok:
                 try:
                     from src.factor.factor_notifier import FactorNotifier
@@ -642,11 +1045,13 @@ def main():
                     print(f"  ⚠️ V1 推送失败（不影响主流程）：{e}")
         elif not has_processed:
             print("\n⏸️ 无 gap 处理，跳过 V1 因子（周末/无新数据时正常行为）")
+            v1_can_run_downstream = False
 
         # 阶段10 A3：周度调仓分析报告（仅周一触发，即处理周五数据时）
         # target_date.weekday() == 4 表示处理的是周五数据，意味着这是周一/周二早上跑的
         # 设计：每周 1 次推送，避免每天刷屏
-        if not args.dry_run and v1_ok:
+        # 阶段11 P1-2：v1_ok 改为 v1_can_run_downstream（允许 fallback）
+        if not args.dry_run and v1_can_run_downstream:
             try:
                 from datetime import date as _date
                 target_str = summary.get("target_date")

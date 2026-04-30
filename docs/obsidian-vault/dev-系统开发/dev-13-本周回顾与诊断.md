@@ -12,12 +12,28 @@ related:
 
 # dev-13 本周回顾与诊断
 
-> [!success] **2026-04-30 20:45 更新：P0-1 + P0-2 已修复并端到端验证通过 ✅**
-> - **P0-1**：daily-scan 加 `_refresh_position_prices`，真跑后 daily_pnl 从永远 0 变成 **+$1,230**
-> - **P0-2**：`connect_quote` 加独立重试（指数退避 5 次）+ V1 失败时推企微告警，验证 V1 跑通输出 `factor_screen_2026-04-30_v1.csv/.md`
-> - **持仓真实浮盈亏**：从系统显示 -$398 → 真实 **+$198.48**（NVDA +$3,180 / TSM +$1,430 / AVGO -$3,878 / META -$387 / MSFT -$147）
-> - **测试**：167 → **177 tests / 0 failures**（+10 case，全 mock 不依赖真 LongPort）
-> - **未做**：P1-1（陈旧告警）/ P1-3（补跑历史）/ P2 系列，留给后续按需启用
+> [!success] **2026-04-30 21:05 更新：P0 + P1 全部修复并端到端验证通过 ✅**
+>
+> **P0 修复**（c71e884）：
+> - **P0-1**：daily-scan 加 `_refresh_position_prices`，daily_pnl 从永远 0 变成 **+$1,230**
+> - **P0-2**：`connect_quote` 加独立重试（指数退避 5 次）+ V1 失败时推企微告警，验证 V1 跑通
+>
+> **P1 修复**（本次提交）：
+> - **P1-1**：`_check_data_staleness`（perf/kline/factor 三类陈旧检查 + 自动企微告警），daily-scan 末尾自动跑
+> - **P1-2**：V1 失败但 DB 有历史 V1 snapshot 时，下游周报照常触发（不写假数据，让 weekly_rotation_report 自带 fallback 逻辑工作）
+> - **P1-3**：`--replay-date YYYY-MM-DD --replay-to YYYY-MM-DD` 补跑机制，dry-run 显示 diff 让用户确认
+>
+> **本周 daily_perf 已用 P1-3 真补**：
+> | 日期 | 修前 | 修后 | 真实日波动 |
+> |---|---|---|---|
+> | 04-23 | 799,094 | **794,954** | 开仓滑点 -$4.6k |
+> | 04-24 | 799,094 | **805,164** | +$10k ⬆️ |
+> | 04-27 | 799,094 | **807,285** ⬆️ | 周一最高点 |
+> | 04-28 | 799,094 | **800,398** | 回落 |
+>
+> **测试**：167 → **189 tests / 0 failures**（P0 +10 / P1 +12）
+>
+> **顺手修的 bug**：陈旧告警和 V1 失败告警之前用错 `alerter.send(body=...)` 签名（应该用 `alerter.warning(text, title=...)`），还没真触发过所以没暴露，现在一起修了
 
 > [!error] 一句话结论
 > **本周 paper trading 实质上"卡住了"**：launchd 每天 08:00 都触发了，但底层代码漏了"刷持仓现价"步骤 + V1 在 `QuoteContext` 初始化时偶发 socket token 失败，导致 8 天里 **0 笔新交易、0 PnL 变化、0 个新 V1 snapshot**。
