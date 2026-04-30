@@ -12,6 +12,13 @@ related:
 
 # dev-13 本周回顾与诊断
 
+> [!success] **2026-04-30 20:45 更新：P0-1 + P0-2 已修复并端到端验证通过 ✅**
+> - **P0-1**：daily-scan 加 `_refresh_position_prices`，真跑后 daily_pnl 从永远 0 变成 **+$1,230**
+> - **P0-2**：`connect_quote` 加独立重试（指数退避 5 次）+ V1 失败时推企微告警，验证 V1 跑通输出 `factor_screen_2026-04-30_v1.csv/.md`
+> - **持仓真实浮盈亏**：从系统显示 -$398 → 真实 **+$198.48**（NVDA +$3,180 / TSM +$1,430 / AVGO -$3,878 / META -$387 / MSFT -$147）
+> - **测试**：167 → **177 tests / 0 failures**（+10 case，全 mock 不依赖真 LongPort）
+> - **未做**：P1-1（陈旧告警）/ P1-3（补跑历史）/ P2 系列，留给后续按需启用
+
 > [!error] 一句话结论
 > **本周 paper trading 实质上"卡住了"**：launchd 每天 08:00 都触发了，但底层代码漏了"刷持仓现价"步骤 + V1 在 `QuoteContext` 初始化时偶发 socket token 失败，导致 8 天里 **0 笔新交易、0 PnL 变化、0 个新 V1 snapshot**。
 >

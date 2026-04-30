@@ -65,11 +65,44 @@ class LongPortClient:
         return Config.from_env()
 
     def connect_quote(self) -> "QuoteContext":
-        """建立行情连接"""
+        """建立行情连接。
+
+        阶段11 P0-2（dev-13）：QuoteContext(cfg) 内部会去拉
+        https://openapi.longportapp.com/v1/socket/token，该 endpoint
+        偶发 Connect error。这一步抛在构造函数内，不在 _retry 装饰范围，
+        所以这里加独立重试（指数退避 2/4/8/16 秒，最多 5 次）。
+        """
         if self._quote_ctx is None:
             cfg = self._get_sdk_config()
-            self._quote_ctx = QuoteContext(cfg)
-            logger.info("LongPort QuoteContext connected")
+            max_attempts = self._config.get("connect_retry_max", 5)
+            base_delay = self._config.get("connect_retry_delay", 2)
+            last_err = None
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    self._quote_ctx = QuoteContext(cfg)
+                    if attempt > 1:
+                        logger.info(
+                            f"LongPort QuoteContext connected (after {attempt} attempts)"
+                        )
+                    else:
+                        logger.info("LongPort QuoteContext connected")
+                    break
+                except Exception as e:
+                    last_err = e
+                    err_msg = str(e)
+                    is_token_err = "socket/token" in err_msg or "client error" in err_msg
+                    logger.warning(
+                        f"connect_quote failed (attempt {attempt}/{max_attempts})"
+                        f"{' [socket/token]' if is_token_err else ''}: {e}"
+                    )
+                    if attempt == max_attempts:
+                        logger.error(
+                            f"connect_quote 已重试 {max_attempts} 次仍失败，抛出"
+                        )
+                        raise
+                    # 指数退避：2 / 4 / 8 / 16 秒
+                    sleep_sec = base_delay * (2 ** (attempt - 1))
+                    time.sleep(sleep_sec)
         return self._quote_ctx
 
     def connect_trade(self) -> "TradeContext":

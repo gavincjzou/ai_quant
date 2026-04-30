@@ -210,6 +210,71 @@ class PaperTradingOrchestrator:
         return self.reconciliation.run()
 
     # ============================================================
+    # 阶段11 P0-1（dev-13）：刷持仓现价
+    # ============================================================
+
+    def _refresh_position_prices(self) -> dict:
+        """
+        拉持仓最新 K 线 → 写回 kline_data → 调 trader.update_prices 刷
+        positions[sym].current_price / market_value / unrealized_pnl
+        以及 stop_loss_manager 内部的现价。
+
+        失败策略：单只失败不抛异常，记 warn 继续；返回 {ok, fail, prices}。
+        被 daily-scan 在每个 gap 日 scan 之前调用。
+        """
+        positions = list(self.trader.positions.keys())
+        result = {"ok": [], "fail": [], "prices": {}}
+
+        if not positions:
+            logger.info("[RefreshPrices] 当前无持仓，跳过")
+            return result
+
+        logger.info(f"[RefreshPrices] 刷新 {len(positions)} 只持仓现价：{positions}")
+
+        try:
+            # count=5 给点冗余以防节假日 / 停牌；同时写回 kline_data
+            fetched = self.fetcher.fetch_history(
+                symbols=positions,
+                period="1d",
+                count=5,
+                save_to_db=True,
+            )
+        except Exception as e:
+            # 整体失败（如 LongPort 完全不通），记 error 但不抛
+            logger.exception(f"[RefreshPrices] 批量拉取失败：{e}")
+            result["fail"] = positions
+            return result
+
+        prices = {}
+        for sym in positions:
+            df = fetched.get(sym)
+            if df is None or df.empty:
+                logger.warning(f"[RefreshPrices] {sym} 拉到空数据，跳过")
+                result["fail"].append(sym)
+                continue
+            try:
+                # 取最后一根的 close（pandas Series → float）
+                last_close = float(df["close"].iloc[-1])
+                if last_close <= 0:
+                    logger.warning(f"[RefreshPrices] {sym} close={last_close} 异常，跳过")
+                    result["fail"].append(sym)
+                    continue
+                prices[sym] = last_close
+                result["ok"].append(sym)
+            except Exception as e:
+                logger.warning(f"[RefreshPrices] {sym} 取 close 失败：{e}")
+                result["fail"].append(sym)
+
+        if prices:
+            self.trader.update_prices(prices)
+            result["prices"] = prices
+            logger.info(f"[RefreshPrices] ✅ 已更新 {len(prices)} 只现价：{prices}")
+        else:
+            logger.warning("[RefreshPrices] ⚠️ 所有持仓刷价均失败")
+
+        return result
+
+    # ============================================================
     # 阶段7 新增：日线扫描模式（方案 C）
     # ============================================================
 
@@ -286,6 +351,12 @@ class PaperTradingOrchestrator:
         for d in gap:
             try:
                 logger.info(f"[DailyScan] ▶️ 处理 {d}")
+                # 阶段11 P0-1（dev-13）：scan 之前先刷持仓现价
+                # 修前 bug：take_daily_snapshot 读 positions[sym].current_price
+                #          但 current_price 只在 _update_position_buy 时设过一次
+                #          导致 8 天 daily_perf 数据完全相同（市值永远是开仓价）
+                # 修法：拉持仓 5 只最新 K 线 → update_prices → 同步 kline_data
+                self._refresh_position_prices()
                 # 日线策略：scan 用当前 DB 里的数据（已包含 d 日收盘）
                 self.scan()
                 recon = self.reconciliation.run(date=d.isoformat())
@@ -506,6 +577,7 @@ def main():
         has_processed = bool(summary.get("processed"))
 
         if not args.dry_run and has_processed:
+            v1_err_detail = ""
             try:
                 print("\n🎯 自动跑 V1 多因子打分...")
                 result = subprocess.run(
@@ -520,9 +592,38 @@ def main():
                     print(f"  ✅ V1 因子快照已更新 → output/factor_screen_*_v1.md")
                     v1_ok = True
                 else:
-                    print(f"  ⚠️ V1 因子失败（不影响主流程）：{result.stderr[-200:]}")
+                    v1_err_detail = result.stderr[-300:]
+                    print(f"  ⚠️ V1 因子失败（不影响主流程）：{v1_err_detail}")
             except Exception as e:
+                v1_err_detail = f"{type(e).__name__}: {e}"
                 logger.warning(f"[DailyScan] V1 因子失败（忽略）：{e}")
+
+            # 阶段11 P0-2（dev-13）：V1 失败时推企微告警，不再静默吞
+            # 避免再次出现 8 天 V1 全失败但没人发现的情况
+            if not v1_ok and v1_err_detail:
+                try:
+                    is_socket_token = "socket/token" in v1_err_detail
+                    title = (
+                        "⚠️ V1 因子打分失败（socket token 闪断）"
+                        if is_socket_token else
+                        "⚠️ V1 因子打分失败"
+                    )
+                    body_lines = [
+                        f"**时间**：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                        f"**类型**：{'LongPort socket/token Connect error' if is_socket_token else '其他异常'}",
+                        f"**详情**：```\n{v1_err_detail[-200:]}\n```",
+                        "",
+                        "**影响**：周报 / 业绩归因 / Forward Backtest 本次跳过",
+                        "**建议**：手动 `./run_daily.sh` 重跑，或检查 LongPort SDK 状态",
+                    ]
+                    orch.alerter.send(
+                        level="warning",
+                        title=title,
+                        body="\n".join(body_lines),
+                        tags=["daily_scan", "v1_factor_fail"],
+                    )
+                except Exception as ae:
+                    logger.warning(f"[DailyScan] V1 失败告警发送失败（忽略）：{ae}")
 
             # V1 成功 → 推送排名变化（阶段9 V1 集成 Phase C）
             if v1_ok:
